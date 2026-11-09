@@ -73,6 +73,21 @@ Options: `--imgsz` (default 640; 480 is about 1.7× faster but misses small back
 `make_report.py` turns a run into `results/standing_sections.csv` and `results/README.md`, adding
 episode titles and the verdicts from the manual review in `results/verdicts.csv`.
 
+## Review video
+
+`review_video.py` cuts every section out of the local videos and joins them into one video to
+watch, with 2 seconds of context either side and a caption bar (clip number, upload date, video
+ID, standing time range, verdict, title). It also writes an index CSV saying where each clip
+starts in the review video.
+
+```bash
+.venv/bin/python standing/review_video.py                      # confirmed + unclear -> standing/output/review.mp4
+.venv/bin/python standing/review_video.py --verdicts "false alarm" --out standing/output/false_alarms.mp4
+.venv/bin/python standing/review_video.py --verdicts all --pad 3
+```
+
+For the current results that is 111 sections in 102 clips, 19 minutes, made in about a minute.
+
 ## Setup
 
 ```bash

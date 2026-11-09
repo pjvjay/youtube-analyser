@@ -15,6 +15,7 @@ from a manual review: 105 confirmed, 6 unclear, 9 false alarms.
 |---|---|
 | `standing/detect_standing.py` | The detector: ffmpeg samples frames, a YOLO pose model finds body points, leg-geometry rules decide standing / sitting / unknown, still figures are dropped. [README](standing/README.md) |
 | `standing/make_report.py` | Turns a detector run plus `results/verdicts.csv` into the results files |
+| `standing/review_video.py` | Joins every standing section into one captioned video to watch (`standing/output/review.mp4`) |
 | `standing/models/` | The pose models (ONNX, exported from Ultralytics YOLO11; AGPL-3.0) |
 | `standing/output/` | The full run: `segments.csv`, `dropped.csv` and per-video CSVs (pose data, frames and thumbnails are not committed) |
 | `results/` | Analysis, the timestamp list, and the manual verdicts |

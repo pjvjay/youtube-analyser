@@ -16,6 +16,7 @@ standing/*/poses/
 standing/*/frames/
 standing/*/thumbs/
 standing/*/review.html
+standing/*/review*.csv
 standing/trial*/
 
 # Models not used by default (re-exportable, see standing/README.md)
