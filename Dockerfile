@@ -15,8 +15,10 @@ COPY service/requirements.txt service/requirements.txt
 RUN pip install --no-cache-dir -r service/requirements.txt \
  && pip uninstall -y openvino-telemetry
 
-COPY standing/detect_standing.py standing/
-COPY standing/models/yolo11s-pose.onnx standing/models/
+COPY standing/detect_standing.py standing/intro.py standing/
+# intro_bank.npz is built locally (standing/intro.py --build-bank) and copied when it exists;
+# the [z] wildcard keeps the build working without it.
+COPY standing/models/yolo11s-pose.onnx standing/models/intro_bank.np[z] standing/models/
 COPY service/app.py service/
 
 ENV WORK_DIR=/tmp/standing-jobs \

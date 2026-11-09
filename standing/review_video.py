@@ -1,5 +1,8 @@
 """Cut every standing section out of the local videos and join them into one review video.
 
+The sections come from results/standing_sections.csv, which only has standing during the
+interviews (intros are left out by detect_standing.py; see intro.py).
+
 Each clip gets a few seconds of context on either side and a caption bar with its number,
 upload date, video ID, the standing time range(s) and the verdict. Sections of the same video
 whose clips would overlap are merged into one clip. Every clip is re-encoded to one format

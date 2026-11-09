@@ -12,8 +12,8 @@ It runs locally today and runs unchanged as an Azure Container App:
 | Call | Does |
 |---|---|
 | `POST /jobs?name=<file>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id` |
-| `GET /jobs/{job_id}` | `queued`, `processing`, `done` or `failed`, plus `video_deleted` |
-| `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing` |
+| `GET /jobs/{job_id}` | `queued`, `processing`, `done` or `failed`, plus `interview_start_s`, `intro_sections` and `video_deleted` |
+| `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing`, for the interview only (the intro is left out) |
 | `DELETE /jobs/{job_id}` | Forgets the job and its result |
 
 The video is deleted when processing ends, whether it succeeded or failed, and leftovers are
@@ -101,8 +101,8 @@ a **Consumption-only** environment and check the first bill.
 
 ## Enhancement: confirm each section with a vision model
 
-The pose rules are cheap and catch most standing people. On the 248 downloaded videos, 105 of
-the 120 reported sections were confirmed by eye. Most of the rest were a guest sitting alone,
+The pose rules are cheap and catch most standing people. On the 248 test videos, 77 of the 92
+sections reported during the interviews were confirmed by eye. Most of the rest were a guest sitting alone,
 square-on to the camera, who looks straight-legged in 2D. A second, very cheap check fixes
 exactly that kind of mistake:
 

@@ -1,15 +1,20 @@
 """HTTP API for the standing detector: upload a video, get the standing sections back as CSV.
 
 The uploaded video only exists on local disk while it waits and is processed. It is deleted
-as soon as the pose model has read it, whether the job succeeded or failed, and any videos
+as soon as it has been analysed, whether the job succeeded or failed, and any videos
 left over from a crash are deleted at startup. Results are a few hundred bytes of CSV held in
 memory until DELETE or until RESULT_TTL_S after the job finished.
 
     POST   /jobs?name=<file name>    request body = the video bytes   -> 202 {"job_id", ...}
     GET    /jobs/{job_id}            status: queued | processing | done | failed
-    GET    /jobs/{job_id}/sections.csv
+    GET    /jobs/{job_id}/sections.csv   standing sections from the interview start on
     DELETE /jobs/{job_id}
     GET    /healthz
+
+Standing in the intro (title sequence, teaser, ads) is left out of the CSV; the status says
+where the interview starts and how many intro sections there were. Finding the start needs the
+bank of title frames in standing/models/intro_bank.npz, built locally with
+standing/intro.py --build-bank; without it each whole video is treated as the interview.
 
 Settings (environment): API_KEY (when set, callers must send it in the x-api-key header),
 WORK_DIR, MAX_UPLOAD_MB (default 2048), RESULT_TTL_S (default 3600), MODEL, IMGSZ (default
@@ -48,7 +53,8 @@ FPS = float(os.environ.get("FPS", "1"))
 CONF, MIN_FRAMES, MAX_GAP = 0.35, 2, 2  # the command line's defaults
 CSV_FIELDS = ["start_s", "end_s", "start", "end", "duration_s", "standing_frames", "max_people_standing"]
 STATUS_FIELDS = ["job_id", "name", "status", "size_mb", "created", "started", "finished",
-                 "frames", "sections", "still_figures_dropped", "error", "video_deleted"]
+                 "frames", "interview_start_s", "sections", "intro_sections", "still_figures_dropped",
+                 "error", "video_deleted"]
 
 jobs = {}  # job_id -> job dict; only touched under `lock`
 lock = threading.Lock()
@@ -69,7 +75,8 @@ def run_jobs():
                 poses = ds.infer(path, state["model"], FPS, CONF)
                 if not len(poses["t"]):
                     raise ValueError("no video frames could be decoded")
-                _, sections = ds.find_sections(poses, job["name"], MIN_FRAMES, MAX_GAP)
+                start = ds.intro.interview_start(path, state["bank"])["interview_start_s"]
+                _, sections, in_intro = ds.find_sections(poses, job["name"], MIN_FRAMES, MAX_GAP, start)
                 width, height = (int(x) for x in poses["size"])
                 sections, still = ds.drop_still_figures(path, sections, FPS, width, height)
                 out = io.StringIO()
@@ -78,7 +85,8 @@ def run_jobs():
                 w.writerows(sections)
                 with lock:
                     job.update(status="done", csv=out.getvalue(), frames=len(poses["t"]),
-                               sections=len(sections), still_figures_dropped=len(still))
+                               interview_start_s=start, sections=len(sections),
+                               intro_sections=len(in_intro), still_figures_dropped=len(still))
         except Exception as e:  # report it on the job; the service keeps running
             with lock:
                 job.update(status="failed", error=f"{type(e).__name__}: {e}")
@@ -105,6 +113,9 @@ async def lifespan(app):
     for leftover in WORK_DIR.glob("*.video"):  # from a crash or restart mid-job
         leftover.unlink(missing_ok=True)
     state["model"] = ds.PoseModel(MODEL, IMGSZ)
+    state["bank"] = ds.intro.load_bank()
+    if state["bank"] is None:
+        print("no intro bank: the intro is not separated", file=sys.stderr)
     threading.Thread(target=run_jobs, daemon=True).start()
     threading.Thread(target=expire_results, daemon=True).start()
     yield
@@ -147,8 +158,8 @@ async def create_job(request: Request, name: str = "video", x_api_key: str | Non
     with lock:
         jobs[job_id] = {"job_id": job_id, "name": name[:200], "status": "queued",
                         "size_mb": round(size / 1e6, 1), "created": time.time(), "started": None,
-                        "finished": None, "frames": None, "sections": None,
-                        "still_figures_dropped": None, "error": None,
+                        "finished": None, "frames": None, "interview_start_s": None, "sections": None,
+                        "intro_sections": None, "still_figures_dropped": None, "error": None,
                         "video_deleted": False, "csv": None}
     work.put((job_id, path))
     return {"job_id": job_id, "status_url": f"/jobs/{job_id}", "result_url": f"/jobs/{job_id}/sections.csv"}
@@ -181,4 +192,4 @@ def delete_job(job_id: str, x_api_key: str | None = Header(default=None)):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "queued": work.qsize(), "runtime": state["model"].runtime,
-            "model": Path(MODEL).name, "imgsz": IMGSZ, "fps": FPS}
+            "model": Path(MODEL).name, "imgsz": IMGSZ, "fps": FPS, "intro_bank": state["bank"] is not None}

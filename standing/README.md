@@ -1,8 +1,9 @@
 # Standing detector
 
-Finds the sections of each video where someone is standing, and writes them as time ranges
-with a thumbnail and a YouTube link for each. Anyone in the frame counts, including
-bystanders in the background, not only the host and guest.
+Finds the sections of each video where someone is standing during the interview, and writes
+them as time ranges with a thumbnail and a YouTube link for each. Anyone in the frame counts,
+including bystanders in the background, not only the host and guest. Standing in the intro
+(teaser, title sequence, sponsor ad) is listed separately.
 
 ## How it works
 
@@ -28,6 +29,39 @@ bystanders in the background, not only the host and guest.
    figure's pixels are compared between samples up to 3 s apart, and a figure that never changes
    by more than 3.5 grey levels is not a person. On all 248 videos this dropped 23 sections, all
    of them still figures, while real people standing still changed by 4.4 or more.
+7. Sections in the intro are listed separately (`intro.py`, below). A section that starts in the
+   intro and ends within 3 s of the interview start counts as intro, since the start can fall
+   in a crossfade; one that runs on longer is split there.
+
+## Where the interview starts (`intro.py`)
+
+Episodes open with a cold-open teaser, the show's title sequence, a sponsor ad or a logo card,
+in some combination, and the interview starts after the last of these. Title sequences, ads and
+logo cards are the same across a season, so:
+
+1. The first 4 minutes of every episode are reduced to one 32×18 grey thumbnail per second.
+2. A thumbnail that matches a short moment (≤ 15 s) in 3 or more other episodes is title
+   material. (Interview footage repeated in a re-run or a compilation episode is a static shot
+   that matches minutes of footage, so it is not counted.) These are saved in
+   `models/intro_bank.npz` (about 1,150 thumbnails, 0.5 MB, for the test set), so a new video
+   can be checked alone. The bank is made from your videos, so it is built locally and not
+   committed.
+3. The interview starts after the last run of title frames that begins in the first 150 s;
+   title frames up to 15 s apart are joined, which bridges a sponsor read between title and ad.
+   Some intros go on to show episode-specific clips inside a fixed frame (a TV set, say), so
+   the intro is extended while the edge of the picture stays as it was in the title frames.
+4. Some episodes (a whole season, in the test set) have a title unique to them. There the
+   interview starts at the first 10 s in which 7 frames show a camera angle seen again later
+   in the episode.
+
+Videos under 4 minutes (Shorts) have no intro. Checked by eye on the 210 test episodes, with the
+frames either side of each detected start. The end of the interview is not detected.
+
+Build the bank before the first run, and again after adding episodes with a new title design:
+
+```bash
+.venv/bin/python standing/intro.py --build-bank *.mp4 *.mkv *.webm
+```
 
 The thresholds and the reasons for them are at the top of `detect_standing.py`.
 
@@ -41,7 +75,7 @@ reported. A guest sitting alone, square-on to the camera, can still be reported 
 From the `youtube-analyser` folder:
 
 ```bash
-.venv/bin/python standing/detect_standing.py 20230811_g0EuMGqQpec.mp4 --out standing/output
+.venv/bin/python standing/detect_standing.py 20240105_sampleVid01.mp4 --out standing/output
 ```
 
 Every video in the folder (yt-dlp's unmerged `.f278.webm` leftover is skipped automatically):
@@ -56,22 +90,28 @@ stopped. The pose model's output is saved in `poses/<video>.npz`, so after chang
 
 Options: `--imgsz` (default 640; 480 is about 1.7× faster but misses small background people),
 `--fps`, `--model` (`yolo11n-pose.onnx` is about 2.5× faster and less accurate), `--runtime`
-(`auto`, `openvino` or `onnxruntime`), `--min-frames`, `--max-gap`, `--conf`, `--threads`.
+(`auto`, `openvino` or `onnxruntime`), `--min-frames`, `--max-gap`, `--conf`, `--threads`,
+`--keep-intro` (treat the whole video as the interview), `--intro-bank`.
 
 ## Output (in `--out`)
 
 | Path | Contents |
 |---|---|
-| `segments.csv` | Every standing section: video, start, end, duration, frames, people standing, pixel change, YouTube link |
+| `segments.csv` | Every standing section in the interviews: video, start, end, duration, frames, people standing, pixel change, YouTube link |
+| `intro.csv` | Standing sections in the intros, for checking |
 | `dropped.csv` | Sections dropped as still figures (statues, posters), for checking |
-| `review.html` | Both, as thumbnails with skeletons drawn (green standing, orange sitting, grey unknown) |
-| `segments/<video>.csv`, `dropped/<video>.csv` | The same, per video |
+| `interview_starts.csv` | Where each video's interview starts, and how that was found |
+| `review.html` | All three, as thumbnails with skeletons drawn (green standing, orange sitting, grey unknown) |
+| `segments/`, `intro/`, `dropped/`, `interview/<video>.csv` | The same, per video |
 | `frames/<video>.csv` | Every sampled frame: people found, standing / sitting / unknown counts, leg measurements |
 | `poses/<video>.npz` | Every person found in every sampled frame, with their 17 body points |
 | `thumbs/` | The best frame of each section, 3× enlarged |
 
-`make_report.py` turns a run into `results/standing_sections.csv` and `results/README.md`, adding
-episode titles and the verdicts from the manual review in `results/verdicts.csv`.
+`make_report.py` turns a run into the `results/` files, adding episode titles and the verdicts
+from the manual review in `results/verdicts.csv`: `standing_sections.csv` (interviews only),
+`outside_interview.csv` (intros, plus sections the review marked "after the interview"),
+`interview_starts.csv` and `README.md`. These name the videos, so they stay local; see
+[`../samples/`](../samples/README.md) for their format.
 
 ## Review video
 
@@ -86,7 +126,8 @@ starts in the review video.
 .venv/bin/python standing/review_video.py --verdicts all --pad 3
 ```
 
-For the current results that is 111 sections in 102 clips, 19 minutes, made in about a minute.
+It reads `results/standing_sections.csv`, so only standing during the interviews is included.
+For the current results that is 83 sections in 74 clips, 16 minutes, made in about a minute.
 
 ## Setup
 

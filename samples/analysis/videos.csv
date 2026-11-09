@@ -1,0 +1,6 @@
+file,upload_date,video_id,title,kind,duration_min
+20240105_sampleVid01.mp4,2024-01-05,sampleVid01,Guest A | EP 1,long,62.8
+20240112_sampleVid02.mp4,2024-01-12,sampleVid02,Guest B | EP 2,long,41.4
+20240119_sampleVid03.mkv,2024-01-19,sampleVid03,Guest C & Guest D | EP 3,long,89.5
+20240126_sampleVid04.webm,2024-01-26,sampleVid04,Guest E | EP 4,long,66.2
+20240127_sampleVid05.mkv,2024-01-27,sampleVid05,A short clip from episode 4,short,0.9

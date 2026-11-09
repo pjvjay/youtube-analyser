@@ -1,0 +1,5 @@
+upload_date,video,title,start,end,duration_s,start_s,end_s,people_standing,verdict,note,youtube
+2024-01-05,20240105_sampleVid01.mp4,Guest A | EP 1,0:15:50,0:15:56,6.0,950.0,956.0,1,confirmed,,https://www.youtube.com/watch?v=sampleVid01&t=950s
+2024-01-12,20240112_sampleVid02.mp4,Guest B | EP 2,0:01:20,0:01:31,11.0,80.0,91.0,1,confirmed,bystander standing in the background,https://www.youtube.com/watch?v=sampleVid02&t=80s
+2024-01-19,20240119_sampleVid03.mkv,Guest C & Guest D | EP 3,0:33:59,0:34:05,6.0,2039.0,2045.0,1,unclear,dark figure in the background; cannot be made out at 144p,https://www.youtube.com/watch?v=sampleVid03&t=2039s
+2024-01-26,20240126_sampleVid04.webm,Guest E | EP 4,1:03:20,1:03:23,3.0,3800.0,3803.0,1,false alarm,guest seated alone on the couch facing the camera,https://www.youtube.com/watch?v=sampleVid04&t=3800s

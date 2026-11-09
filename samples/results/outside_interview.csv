@@ -1,0 +1,4 @@
+where,upload_date,video,title,start,end,duration_s,start_s,end_s,people_standing,verdict,note,youtube
+intro,2024-01-05,20240105_sampleVid01.mp4,Guest A | EP 1,0:00:12,0:00:14,2.0,12.0,14.0,2,confirmed,opening sequence,https://www.youtube.com/watch?v=sampleVid01&t=12s
+intro,2024-01-12,20240112_sampleVid02.mp4,Guest B | EP 2,0:00:17,0:00:19,2.0,17.0,19.0,1,confirmed,teaser before the title sequence,https://www.youtube.com/watch?v=sampleVid02&t=17s
+after the interview,2024-01-19,20240119_sampleVid03.mkv,Guest C & Guest D | EP 3,1:27:43,1:27:47,4.0,5263.0,5267.0,2,after the interview,trailer played after the end card,https://www.youtube.com/watch?v=sampleVid03&t=5263s

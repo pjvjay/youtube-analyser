@@ -1,8 +1,12 @@
-"""Build results/standing_sections.csv and results/README.md from a detector run.
+"""Build the results/ files from a detector run.
 
-Joins the detector's sections (standing/output/segments.csv) with the manual review
-(results/verdicts.csv) and the episode titles (analysis/videos.csv). Sections that have no
-verdict yet are listed as "not reviewed".
+Joins the detector's sections (standing/output/segments.csv, and intro.csv for standing before
+the interview starts) with the manual review (results/verdicts.csv) and the episode titles
+(analysis/videos.csv). Sections that have no verdict yet are listed as "not reviewed".
+
+Writes results/standing_sections.csv (standing during the interviews), outside_interview.csv
+(standing in the intros, found by the detector, and after the interview, marked in the review;
+both are left out of the main list), interview_starts.csv and README.md.
 
 Usage (from the youtube-analyser folder):
     .venv/bin/python standing/make_report.py
@@ -16,6 +20,8 @@ OUT = ROOT / "standing" / "output"
 RESULTS = ROOT / "results"
 FIELDS = ["upload_date", "video", "title", "start", "end", "duration_s", "start_s", "end_s",
           "people_standing", "verdict", "note", "youtube"]
+START_FIELDS = ["upload_date", "video", "title", "interview_start", "interview_start_s", "how"]
+AFTER = "after the interview"  # verdict for standing in material played after the interview
 
 
 def load(path):
@@ -23,28 +29,46 @@ def load(path):
         return list(csv.DictReader(f))
 
 
+def save(path, fields, rows):
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+
+
 def main():
     videos = {r["file"]: r for r in load(ROOT / "analysis" / "videos.csv")}
     verdicts = {(r["video"], float(r["start_s"])): r for r in load(RESULTS / "verdicts.csv")}
     sections, dropped = load(OUT / "segments.csv"), load(OUT / "dropped.csv")
+    intro, starts = load(OUT / "intro.csv"), load(OUT / "interview_starts.csv")
     analysed = sorted(p.stem for p in (OUT / "segments").glob("*.csv"))
 
-    rows = []
-    for s in sections:
-        v = verdicts.get((s["video"], float(s["start_s"])), {})
-        meta = videos.get(s["video"], {})
-        rows.append({"upload_date": meta.get("upload_date", ""), "video": s["video"],
-                     "title": meta.get("title", ""), "start": s["start"], "end": s["end"],
-                     "duration_s": s["duration_s"], "start_s": s["start_s"], "end_s": s["end_s"],
-                     "people_standing": s["max_people_standing"],
-                     "verdict": v.get("verdict", "not reviewed"), "note": v.get("note", ""),
-                     "youtube": s["youtube"]})
-    rows.sort(key=lambda r: (r["video"], float(r["start_s"])))
+    def rows_for(found):
+        out = []
+        for s in found:
+            v = verdicts.get((s["video"], float(s["start_s"])), {})
+            meta = videos.get(s["video"], {})
+            out.append({"upload_date": meta.get("upload_date", ""), "video": s["video"],
+                        "title": meta.get("title", ""), "start": s["start"], "end": s["end"],
+                        "duration_s": s["duration_s"], "start_s": s["start_s"], "end_s": s["end_s"],
+                        "people_standing": s["max_people_standing"],
+                        "verdict": v.get("verdict", "not reviewed"), "note": v.get("note", ""),
+                        "youtube": s["youtube"]})
+        return sorted(out, key=lambda r: (r["video"], float(r["start_s"])))
+
+    rows, intro_rows = rows_for(sections), rows_for(intro)
+    after_rows = [r for r in rows if r["verdict"] == AFTER]
+    rows = [r for r in rows if r["verdict"] != AFTER]
+    outside = sorted([{**r, "where": "intro"} for r in intro_rows] + [{**r, "where": AFTER} for r in after_rows],
+                     key=lambda r: (r["video"], float(r["start_s"])))
+    start_rows = sorted(({"upload_date": videos.get(s["video"], {}).get("upload_date", ""), "video": s["video"],
+                          "title": videos.get(s["video"], {}).get("title", ""),
+                          "interview_start": s["interview_start"], "interview_start_s": s["interview_start_s"],
+                          "how": s["how"]} for s in starts), key=lambda r: r["video"])
     RESULTS.mkdir(exist_ok=True)
-    with open(RESULTS / "standing_sections.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS, lineterminator="\n")
-        w.writeheader()
-        w.writerows(rows)
+    save(RESULTS / "standing_sections.csv", FIELDS, rows)
+    save(RESULTS / "outside_interview.csv", ["where"] + FIELDS, outside)
+    save(RESULTS / "interview_starts.csv", START_FIELDS, start_rows)
 
     by_stem = {Path(f).stem: r for f, r in videos.items()}
     hours = sum(float(by_stem[stem]["duration_min"]) for stem in analysed if stem in by_stem) / 60
@@ -54,13 +78,20 @@ def main():
     with_standing = sorted({r["video"] for r in confirmed})
     notes = Counter(r["note"] or "person standing in the studio" for r in confirmed)
 
+    hows = Counter(r["how"] for r in start_rows)
+    long_starts = sorted(float(r["interview_start_s"]) for r in start_rows if r["how"] != "short video")
     md = [
-        "# Where someone is standing: results for all downloaded videos",
+        "# Where someone is standing during the interviews: results for the downloaded videos",
+        "",
+        "Generated by `standing/make_report.py`. Local only: this file names the videos.",
         "",
         f"The standing detector (`standing/detect_standing.py`) analysed **{len(analysed)} videos "
-        f"({hours:.1f} hours)** at 1 frame per second. It reported **{len(rows)} standing sections**, "
-        f"after dropping {len(dropped)} sections that were statues, posters or artwork (figures that "
-        "never moved). Every one of the remaining sections was checked by eye:",
+        f"({hours:.1f} hours)** at 1 frame per second. Only standing **during the interviews** is "
+        "listed: each episode's intro (cold-open teaser, title sequence, sponsor ad, logo card) is "
+        "found automatically and left out, and so is anything played after the interview. After "
+        f"dropping {len(dropped)} sections that were statues, posters or artwork (figures that never "
+        f"moved), the detector reported **{len(rows)} standing sections** in the interviews. Every "
+        "one was checked by eye:",
         "",
         "| Verdict | Sections | Meaning |",
         "|---|---|---|",
@@ -83,6 +114,28 @@ def main():
         "[`standing_sections.csv`](standing_sections.csv). The table below has the same sections",
         "except the false alarms.",
         "",
+        "## Left out: before and after the interview",
+        "",
+        f"- **Intros: {len(intro_rows)} sections** in {len({r['video'] for r in intro_rows})} episodes "
+        "(title sequences and cold-open teasers). `standing/intro.py` finds where each interview "
+        "starts: title sequences, ads and logo cards are shared by many episodes, so the interview "
+        "starts after the last stretch of footage the episode shares with 3 or more other episodes. "
+        "Episodes whose titles are unique to them use the first stretch of camera angles that recur "
+        "later in the episode instead.",
+        f"  - The interview starts after a median of {long_starts[len(long_starts) // 2] if long_starts else 0:.0f} s "
+        f"(range {long_starts[0] if long_starts else 0:.0f}-{long_starts[-1] if long_starts else 0:.0f} s). "
+        "Found from the shared title in "
+        f"{hows['title']} episodes, from recurring camera angles in {hows['angles']}, from footage shared "
+        f"with one other episode in {hows['shared']}; Shorts ({hows['short video']}) have no intro.",
+        "  - Check the starts by eye: look at the frames either side of each one. A sponsor ad that no "
+        "other episode shares is counted as interview.",
+        f"- **After the interview: {len(after_rows)} section(s)** marked `after the interview` in the "
+        "review (for example a trailer played after the end card). The end of the interview is not "
+        "detected automatically, so check the sections in the last few minutes of each episode.",
+        "",
+        "Both are listed in [`outside_interview.csv`](outside_interview.csv), and every episode's "
+        "interview start is in [`interview_starts.csv`](interview_starts.csv).",
+        "",
         "## How well it works",
         "",
         f"- **Precision**: {count['confirmed']} of {len(rows)} reported sections are confirmed "
@@ -92,9 +145,9 @@ def main():
         "- **Misses**: 112 frames the detector did not flag were checked by eye:",
         "  - 48 frames where someone's legs were visible: 2 missed standing people (one only half in "
         "frame, one 2 seconds before an opening the detector did catch).",
-        "  - 32 frames from the first 20 seconds of episodes: 3 to 5 missed, all waist-up shots of "
-        "standing people whose legs are out of frame.",
-        "  - 32 random frames: no clear misses, one ambiguous (people at an expo table).",
+        "  - 32 frames from the first 20 seconds of episodes (mostly intros, now left out): 3 to 5 "
+        "missed, all waist-up shots of standing people whose legs are out of frame.",
+        "  - 32 random frames: no clear misses, one ambiguous (people at a table).",
         "- **So**: when a person's legs are in frame, standing is found reliably. Waist-up shots of "
         "standing people are not, by design, because without legs the rules cannot tell standing "
         "from sitting facing the camera.",

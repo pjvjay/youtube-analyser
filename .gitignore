@@ -24,6 +24,17 @@ standing/models/yolo26*.onnx
 
 .DS_Store
 
-# Per-video copies of segments.csv / dropped.csv; they only mark progress for resuming a run
+# Per-video copies of the combined CSVs; they only mark progress for resuming a run
 standing/*/segments/
 standing/*/dropped/
+standing/*/intro/
+standing/*/interview/
+
+# Local only: anything that names or is made from the videos (inventory, yt-dlp archive, results,
+# manual review, detector output, the title-frame bank). samples/ shows the formats with made-up names.
+/analysis/
+/results/
+/standing/output/
+/standing/models/intro_bank.npz
+/archive.txt
+/long_ids.txt
