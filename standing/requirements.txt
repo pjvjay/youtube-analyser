@@ -1,0 +1,7 @@
+numpy==2.3.5
+opencv-python-headless==5.0.0.93
+onnxruntime==1.23.2
+# OpenVINO is optional (about 1.4x faster on Intel CPUs). It pulls in openvino-telemetry, which
+# sends a usage event to Google Analytics on every `import openvino` unless you opted out, so
+# remove it after installing:  pip uninstall -y openvino-telemetry
+openvino==2025.4.1

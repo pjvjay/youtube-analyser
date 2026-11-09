@@ -1,0 +1,7 @@
+# Only the Dockerfile's COPY sources are needed; keep the 6.8 GB of videos and secrets out of the build context
+*
+!standing/detect_standing.py
+!standing/requirements.txt
+!standing/models/yolo11s-pose.onnx
+!service/app.py
+!service/requirements.txt

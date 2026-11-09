@@ -1,0 +1,3 @@
+-r ../standing/requirements.txt
+fastapi==0.162.2
+uvicorn[standard]==0.54.0
