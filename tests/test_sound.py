@@ -5,7 +5,7 @@ pyannote.audio test set) in alternating turns of 2-6 s: one voice, two, three, t
 crowd babble 5 dB below the voices, silence (room tone), and two voices with a third who says
 only 3 s.
 
-    .venv/bin/python -m unittest tests.test_sound -v      (about a minute)
+    pytest tests/test_sound.py      (about a minute)
 """
 import itertools
 import subprocess
@@ -15,15 +15,16 @@ from pathlib import Path
 
 import numpy as np
 
-from tests.helpers import audio, mf
+from tests.helpers import audio, media, mf
+from youtube_analyser import inference
 
 MODELS = None
 
 
 def analysed(name):
     global MODELS
-    MODELS = MODELS or audio.VoiceModels()
-    wav = audio.load(mf.build(name))
+    MODELS = MODELS or inference.VoiceModels()
+    wav = media.load_audio(mf.build(name))
     return wav, audio.analyse(wav, MODELS)
 
 
@@ -95,14 +96,14 @@ class Noise(unittest.TestCase):
 
 class NoSound(unittest.TestCase):
     def test_a_video_without_sound(self):
-        self.assertIsNone(audio.load(mf.build("three_talkers_no_sound")))
+        self.assertIsNone(media.load_audio(mf.build("three_talkers_no_sound")))
 
     def test_a_sound_too_short_to_judge(self):
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp) / "short.mp4"
             subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=64x36:d=1", "-f", "lavfi",
                             "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5", "-shortest", str(clip)], check=True)
-            self.assertIsNone(audio.load(clip))
+            self.assertIsNone(media.load_audio(clip))
 
 
 if __name__ == "__main__":

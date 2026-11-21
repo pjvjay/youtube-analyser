@@ -1,4 +1,4 @@
-"""Searching for a described person doing an action, end to end (standing/search.py, people.py).
+"""Searching for a described person doing an action, end to end (`yta search`: search.py, people.py, query.py).
 
 The character clips (see make_fixtures.CHARACTERS) put a woman (the astronaut portrait, her hair
 dyed purple or blue, or left natural) and a man (the carphone talker) side by side, taking turns
@@ -14,10 +14,8 @@ Jane is enrolled from duo_purple 0-8 s, so finding her in solo_blue is recognisi
 another video. The street clips two_cross and walk_past_bystander have a man in a beige coat and
 one in a blue coat.
 
-    .venv/bin/python -m unittest tests.test_search -v      (first run about 2 minutes)
+    pytest tests/test_search.py      (first run about 2 minutes)
 """
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +23,9 @@ from pathlib import Path
 import numpy as np
 
 from tests import helpers as h
-from tests.helpers import characteristics as people, mf, search
+from tests.helpers import characteristics as people
+from tests.helpers import mf, search
+from tests.helpers import query as queries
 
 CHARACTER_CLIPS = list(mf.CHARACTERS)
 STREET_CLIPS = ["two_cross", "walk_past_bystander"]
@@ -41,7 +41,7 @@ def setUpModule():
     state["config_file"] = config
     state["config"] = people.load_config(config)
     videos = [mf.build(n) for n in CHARACTER_CLIPS + STREET_CLIPS]
-    state["searcher"] = search.Searcher(h.search_options(videos=videos), state["config"])
+    state["searcher"] = h.searcher(state["config"], videos=videos)
 
 
 def tearDownModule():
@@ -50,7 +50,7 @@ def tearDownModule():
 
 def find(query, clips=CHARACTER_CLIPS):
     """The search's rows for a query, each with the seat of the person found (left, right, centre)."""
-    req = search.parse(query, state["config"], ["Jane"])
+    req = queries.parse(query, state["config"], ["Jane"])
     out = []
     for name in clips:
         v = mf.path(name)
@@ -129,9 +129,18 @@ class Looks(unittest.TestCase):
             for r in rows:   # the boxed person is the one in that coat
                 poses = np.load(h.OUT / "poses" / "two_cross.npz")
                 b = poses["box"][r["best_j"]]
-                when = h.actions.picture_time(r["best_t"], 1.0)
+                when = h.media.picture_time(r["best_t"], 1.0)
                 self.assertGreater(h.overlap(mf.box(view, persons[colour], when), (b[0], b[1], b[0] + b[2], b[1] + b[3])),
                                    0.3, (colour, r))
+
+    def test_a_described_person_jumping(self):
+        """Jumps are judged in the 5-fps samples: each is put down to the person it belongs to."""
+        h.run("jumping", ["jump_three"])
+        want = [(float(r["start_s"]), float(r["end_s"])) for r in h.sections("jump_three", "jumping")]
+        rows = find("someone in a beige coat jumping", ["jump_three"])
+        self.assertEqual([(r["start_s"], r["end_s"]) for r in rows], want)
+        self.assertEqual(len({r["person"] for r in rows}), 1)
+        self.assertEqual(find("someone in a blue coat jumping", ["jump_three"]), [])
 
     def test_walking_in_a_blue_coat(self):
         rows = find("man in a blue coat walking", STREET_CLIPS)
@@ -150,10 +159,9 @@ class CommandLine(unittest.TestCase):
     def test_the_command_line_and_its_files(self):
         with tempfile.TemporaryDirectory() as out:
             clips = [str(mf.path(n)) for n in CHARACTER_CLIPS]
-            r = subprocess.run([sys.executable, str(h.REPO / "standing" / "search.py"), "Jane talking", *clips,
-                                "--out", str(h.OUT), "--results", out, "--keep-intro", "--config",
-                                str(state["config_file"]), *h.OPTIONS], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            r = h.yta("search", "Jane talking", *clips, "--out", h.OUT, "--results", out, "--keep-intro", "--config",
+                      state["config_file"], *h.OPTIONS)
+            self.assertEqual(r.code, 0, r.stderr)
             self.assertIn("looking for: name Jane; action: talking", r.stdout)
             folder = Path(out) / "jane-talking"
             rows = h.csv_rows(folder / "matches.csv")
@@ -163,43 +171,48 @@ class CommandLine(unittest.TestCase):
             self.assertTrue(all((folder / "thumbs" / x["thumb"]).exists() for x in rows))
             self.assertIn("Jane talking", (folder / "index.html").read_text())
 
-            r = subprocess.run([sys.executable, str(h.REPO / "standing" / "search.py"), "woman with purple hair dancing",
-                                clips[0], "--out", str(h.OUT), "--results", out, "--keep-intro", "--explain", *h.OPTIONS],
-                               capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            r = h.yta("search", "woman with purple hair dancing", clips[0], "--out", h.OUT, "--results", out,
+                      "--keep-intro", "--explain", *h.OPTIONS)
+            self.assertEqual(r.code, 0, r.stderr)
             self.assertIn("ignored words: dancing", r.stdout)
             self.assertIn("duo_purple.mp4 person", r.stdout)          # --explain: everyone seen
 
     def test_what_it_adds_is_saved(self):
-        saved = h.OUT / "appearance" / "duo_purple.npz"
-        find("woman with purple hair", ["duo_purple"])
-        before = saved.stat().st_mtime
-        find("woman with purple hair talking", ["duo_purple"])     # nothing new to measure
-        self.assertEqual(saved.stat().st_mtime, before)
-        # her gender came from her voice, so the face model has not run; asking for an age runs it,
-        # on the clearest faces of the man only (the one with black hair), who looks about 38
-        self.assertEqual(int(np.load(saved)["faced"].sum()), 0)
-        self.assertEqual(find("old man with black hair", ["duo_purple"]), [])
-        self.assertEqual(int(np.load(saved)["faced"].sum()), state["config"]["look"]["faces_per_person"])
+        """A search saves what it measures (appearance/), and measures only what a query needs."""
+        find("woman with purple hair talking", ["duo_purple"])   # everything else is saved already
+        with tempfile.TemporaryDirectory() as tmp:
+            for part in ("poses", "faces", "audio", "camera"):   # a cache with no appearance yet
+                (Path(tmp) / part).mkdir()
+                (Path(tmp) / part / "duo_purple.npz").write_bytes((h.OUT / part / "duo_purple.npz").read_bytes())
+            s = search.Searcher(state["config"], h.SETTINGS, Path(tmp))
+            saved = Path(tmp) / "appearance" / "duo_purple.npz"
+            req = lambda q: queries.parse(q, state["config"])
+            s.search(mf.path("duo_purple"), req("woman with purple hair"))
+            before = saved.stat().st_mtime_ns
+            s.search(mf.path("duo_purple"), req("woman with purple hair talking"))   # nothing new to measure
+            self.assertEqual(saved.stat().st_mtime_ns, before)
+            # her gender came from her voice, so the face model has not run; asking for an age runs
+            # it, on the clearest faces of the man only (the one with black hair), who looks about 38
+            self.assertEqual(int(np.load(saved)["faced"].sum()), 0)
+            self.assertEqual(s.search(mf.path("duo_purple"), req("old man with black hair")), [])
+            self.assertEqual(int(np.load(saved)["faced"].sum()), state["config"]["look"]["faces_per_person"])
 
 
 class Cheapest(unittest.TestCase):
     def test_nobody_with_the_colour_means_no_more_work(self):
         with tempfile.TemporaryDirectory() as out:
-            opts = h.search_options()
-            opts.out = Path(out)
-            s = search.Searcher(opts, state["config"])
-            req = search.parse("woman with green hair talking", state["config"])
+            s = search.Searcher(state["config"], h.SETTINGS, Path(out))
+            req = queries.parse("woman with green hair talking", state["config"])
             self.assertEqual(s.search(mf.path("duo_purple"), req, "talking"), [])
             self.assertEqual(s.note, "nobody looks right: no green hair seen")
             self.assertEqual(sorted(p.name for p in Path(out).iterdir()), ["appearance", "poses"])   # no faces, sound, camera
 
     def test_the_quick_look(self):
-        s, req = state["searcher"], search.parse("woman with purple hair talking", state["config"])
+        s, req = state["searcher"], queries.parse("woman with purple hair talking", state["config"])
         self.assertTrue(s.scout(mf.path("duo_purple"), req))
         self.assertFalse(s.scout(mf.path("duo_natural"), req))
         self.assertIn("no purple hair seen", s.note)
-        self.assertTrue(s.scout(mf.path("duo_natural"), search.parse("man talking", state["config"])))  # no colour: nothing to look for
+        self.assertTrue(s.scout(mf.path("duo_natural"), queries.parse("man talking", state["config"])))  # no colour: nothing to look for
 
     def test_anyone_doing_it_is_the_detectors_sections(self):
         h.run("jumping", ["jump_three"])

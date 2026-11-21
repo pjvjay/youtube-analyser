@@ -1,0 +1,91 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-analyser"
+dynamic = ["version"]
+description = "Find people doing actions (standing, talking, jumping, ...) in YouTube videos, search a whole channel for a described person, and serve it as an API on one machine or in the cloud."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "youtube-analyser contributors" }]
+keywords = ["video", "pose estimation", "youtube", "search", "action recognition"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Topic :: Multimedia :: Video",
+]
+# ffmpeg and ffprobe (version 5 or later) must be on the PATH.
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "onnxruntime>=1.17",
+]
+
+[project.optional-dependencies]
+# About 1.4-1.8x faster on Intel CPUs. It pulls in openvino-telemetry, which sends a usage event on
+# every import unless you opted out: remove it after installing (pip uninstall -y openvino-telemetry).
+openvino = ["openvino>=2024.0"]
+service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+azure = ["azure-storage-blob>=12.19", "azure-storage-queue>=12.9", "azure-identity>=1.15"]
+# not pinned: only a recent yt-dlp keeps up with YouTube
+youtube = ["yt-dlp"]
+all = ["youtube-analyser[openvino,service,azure,youtube]"]
+dev = ["youtube-analyser[all]", "pytest>=8", "pytest-cov>=5", "httpx>=0.27"]
+
+[project.scripts]
+yta = "youtube_analyser.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "youtube_analyser.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+youtube_analyser = ["assets/people.toml", "assets/models/*.onnx"]
+
+[tool.setuptools.exclude-package-data]
+# the smaller pose model is not used by default; it stays in the repository for --model
+youtube_analyser = ["assets/models/yolo11n-pose.onnx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: end-to-end tests that run the models on made clips (minutes)",
+    "azure: needs the Azurite storage emulator (started automatically when it is installed)",
+]
+filterwarnings = ["ignore::DeprecationWarning:openvino.*", "ignore:Using `httpx` with `starlette.testclient`"]
+
+[tool.coverage.run]
+source = ["youtube_analyser"]
+branch = false
+concurrency = ["thread"]
+parallel = true
+patch = ["subprocess"]       # `python -m youtube_analyser` run by the tests is measured too
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
+
+[tool.ruff]
+line-length = 150
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]
+ignore = [
+    "E731",    # small lambdas named for readability
+    "SIM108",  # if/else blocks kept where they read better than a conditional expression
+    "B905",    # zip() without strict=: the lengths are equal by construction
+    "SIM105",  # try/except/pass where contextlib.suppress would hide what is expected
+    "B007",    # loop variables named for what they are, even when unused
+    "SIM300",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["youtube_analyser", "tests"]

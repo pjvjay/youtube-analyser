@@ -1,37 +1,33 @@
-# The standing (and other actions) detector API (service/app.py) as one container, for running locally or on
-# Azure Container Apps. Build from the repository root:
-#   docker build -t standing-api .
-#   docker run -p 8000:8000 -e API_KEY=change-me standing-api
-FROM python:3.12-slim
+# One image for the HTTP API (yta serve, the default command) and the workers (yta worker ...),
+# on one machine or on Azure Container Apps (see docs/cloud.md). Build from the repository root:
+#   docker build -t youtube-analyser .
+#   docker run -p 8000:8000 -e API_KEY=change-me youtube-analyser
+#   docker run youtube-analyser yta worker --store azblob://acct/yta --queue azqueue://acct/yta-work --until-empty
 
+# 1. the wheel (the package with its models)
+FROM python:3.12-slim AS build
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip wheel --no-cache-dir --no-deps -w /wheels .
+
+# 2. the image: ffmpeg, the wheel with OpenVINO, the API, Azure storage and yt-dlp
+FROM python:3.12-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY standing/requirements.txt standing/requirements.txt
-COPY service/requirements.txt service/requirements.txt
+COPY --from=build /wheels /wheels
 # openvino-telemetry would send a usage event on every import; OpenVINO works without it.
-RUN pip install --no-cache-dir -r service/requirements.txt \
- && pip uninstall -y openvino-telemetry
-
-COPY standing/detect_standing.py standing/intro.py standing/actions.py standing/audio.py \
-     standing/people.py standing/search.py standing/people.toml standing/
-# intro_bank.npz is built locally (standing/intro.py --build-bank) and copied when it exists;
-# the [z] wildcard keeps the build working without it. The face models (2.7 MB) are for
-# smiling, talking and silent; the voice models (7 MB) for talking and silent; the person mask
-# (0.5 MB) and gender/age (49 MB, see standing/people.toml about its training data) for who=.
-# To leave gender/age out, delete that file from the line below (who= then takes gender from
-# voices only).
-COPY standing/models/yolo11s-pose.onnx standing/models/face_landmark.onnx standing/models/face_expression.onnx \
-     standing/models/voice_activity.onnx standing/models/voice_embedding.onnx \
-     standing/models/person_mask.onnx standing/models/gender_age.onnx \
-     standing/models/intro_bank.np[z] standing/models/
-COPY service/app.py service/
-
-ENV WORK_DIR=/tmp/standing-jobs \
-    IMGSZ=640 \
+RUN pip install --no-cache-dir "$(ls /wheels/*.whl)[openvino,service,azure,youtube]" \
+ && pip uninstall -y openvino-telemetry \
+ && rm -rf /wheels
+# The bank of title frames (yta intro --build-bank) is built from your videos, so it is not in
+# the repository; it is copied in when it is there (README.md keeps the line valid without it).
+WORKDIR /app
+COPY README.md intro_bank.np[z] /app/
+ENV WORK_DIR=/tmp/yta \
+    INTRO_BANK=/app/intro_bank.npz \
     PYTHONUNBUFFERED=1
 USER nobody
 EXPOSE 8000
-CMD ["uvicorn", "service.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["yta", "serve", "--host", "0.0.0.0", "--port", "8000"]

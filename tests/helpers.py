@@ -1,13 +1,14 @@
-"""Shared by the tests: build a clip, run the detector on it like a user would, and look at the result.
+"""Shared by the tests: build a clip, run the commands on it like a user would (in this process,
+so the models load once and coverage sees everything), and look at the result.
 
-run(action, names) runs standing/detect_standing.py on the clips (once; the detector's own caches
-and "done" files make later runs instant), into tests/.cache/v<N>/out. people(name, action) then
-labels everyone in every sample from the same cached inputs, so a test can check each person,
-not just the sections.
+run(action, names) runs `yta detect` on the clips into tests/.cache/v<N>/out (the detector's own
+caches and "done" files make later runs instant). people(name, action) then labels everyone in
+every sample from the same saved model output, so a test can check each person, not just the
+sections.
 
 DETECTOR_OPTIONS (environment) runs the end-to-end tests with other pose model settings, into a
 cache folder of their own, to see what a faster setting costs:
-    DETECTOR_OPTIONS="--imgsz 320" .venv/bin/python -m unittest tests.test_movement tests.test_talking tests.test_search
+    DETECTOR_OPTIONS="--imgsz 320" pytest tests/test_movement.py tests/test_talking.py tests/test_search.py
 """
 import argparse
 import csv
@@ -15,51 +16,70 @@ import functools
 import os
 import re
 import shlex
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
 
+from youtube_analyser import actions, analysis, audio, cli, faces, media, motion, query, search
+from youtube_analyser import people as characteristics
+from youtube_analyser.analysis import Settings, VideoAnalysis
+
+from . import make_fixtures as mf
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-sys.path.insert(0, str(REPO / "standing"))
-sys.path.insert(0, str(HERE))
-
-import actions  # noqa: E402
-import audio  # noqa: E402,F401  (for the tests: from tests.helpers import audio)
-import detect_standing as ds  # noqa: E402
-import make_fixtures as mf  # noqa: E402
-import people as characteristics  # noqa: E402  (standing/people.py; "people" is the helper below)
-import search  # noqa: E402
-
 OPTIONS = shlex.split(os.environ.get("DETECTOR_OPTIONS", ""))
 OUT = mf.CACHE / ("out-" + re.sub(r"[^a-z0-9.]+", "-", " ".join(OPTIONS).lower()).strip("-") if OPTIONS else "out")
-__all__ = ["actions", "audio", "ds", "mf", "characteristics", "search", "REPO", "OUT", "OPTIONS", "search_options", "run", "people", "sections", "csv_rows", "out_dir",
-           "track_person", "overlap", "in_view", "steady"]
+__all__ = ["actions", "analysis", "audio", "faces", "media", "motion", "characteristics", "query", "search", "mf",
+           "REPO", "OUT", "OPTIONS", "SETTINGS", "Captured", "yta", "run", "people", "sections", "csv_rows", "out_dir",
+           "searcher", "csv_rows_text", "track_person", "overlap", "in_view", "steady"]
+
+
+def _settings():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--model", default=Settings().pose_model)
+    ap.add_argument("--fps", type=float, default=1.0)
+    known, _ = ap.parse_known_args(OPTIONS)
+    return Settings(pose_model=known.model, imgsz=known.imgsz, fps=known.fps)
+
+
+SETTINGS = _settings()
+
+
+class Captured:
+    """What a command printed (stdout / stderr) and its exit code."""
+
+    def __init__(self):
+        self.out, self.err, self.code = [], [], None
+
+    def __call__(self, *args, file=None, flush=None, sep=" ", end="\n"):
+        (self.err if file is not None else self.out).append(sep.join(str(a) for a in args) + end)
+
+    @property
+    def stdout(self):
+        return "".join(self.out)
+
+    @property
+    def stderr(self):
+        return "".join(self.err)
+
+
+def yta(*argv):
+    """Run a `yta` command in this process; returns a Captured."""
+    c = Captured()
+    c.code = cli.main([str(a) for a in argv], log=c)
+    return c
 
 
 def run(action, names, *options):
-    """Run the detector CLI for an action on these clips (building them first). Clips already
-    done for this action are skipped by the detector itself."""
-    clips = [str(mf.build(n)) for n in names]
-    r = subprocess.run([sys.executable, str(REPO / "standing" / "detect_standing.py"), *clips, "--out", str(OUT),
-                        "--keep-intro", "--action", action, *OPTIONS, *options], capture_output=True, text=True)
-    if r.returncode or "FAILED" in r.stderr:
-        raise AssertionError(f"detect_standing.py failed:\n{r.stdout[-2000:]}\n{r.stderr[-4000:]}")
+    """`yta detect` for an action on these clips (building them first). Clips already done for
+    this action are skipped by the detector itself."""
+    clips = [mf.build(n) for n in names]
+    r = yta("detect", *clips, "--out", OUT, "--keep-intro", "--action", action, *OPTIONS, *options)
+    if r.code or "FAILED" in r.stderr:
+        raise AssertionError(f"yta detect failed:\n{r.stdout[-2000:]}\n{r.stderr[-4000:]}")
     return r
-
-
-def search_options(**over):
-    """search.options() for the tests' cache, with the pose model settings of DETECTOR_OPTIONS."""
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--model", type=Path, default=ds.DEFAULT_MODEL)
-    ap.add_argument("--fps", type=float, default=1.0)
-    known, _ = ap.parse_known_args(OPTIONS)
-    if not known.model.is_absolute():
-        known.model = REPO / known.model
-    return search.options(OUT, imgsz=known.imgsz, model=known.model, fps=known.fps, keep_intro=True, **over)
 
 
 def out_dir(action):
@@ -68,8 +88,7 @@ def out_dir(action):
 
 def sections(name, action, kind="segments"):
     """The sections the detector wrote for one clip (segments, intro or dropped)."""
-    with open(out_dir(action) / kind / f"{name}.csv", newline="") as f:
-        return list(csv.DictReader(f))
+    return csv_rows(out_dir(action) / kind / f"{name}.csv")
 
 
 def csv_rows(path):
@@ -77,19 +96,24 @@ def csv_rows(path):
         return list(csv.DictReader(f))
 
 
-@functools.lru_cache(maxsize=None)
-def people(name, action, motion=None, no_sound=False):
-    """(timeline, people per sampled frame) for a clip, labelled for the action from the inputs
-    the detector cached (so this runs the detector first if needed)."""
-    options = (["--motion", motion] if motion else []) + (["--no-sound"] if no_sound else [])
-    run(action, [name], *options)
-    clip = mf.path(name)
-    poses = dict(np.load(OUT / "poses" / f"{clip.stem}.npz"))
-    args = argparse.Namespace(out=OUT, action=action, force=False, no_sound=no_sound, motion=motion,
-                              jump_fps=actions.JUMP_FPS, conf=0.35)
-    extra, _ = ds.load_input(clip, poses, args, models=None)
-    timeline, by_frame = ds.label_people(poses, action, extra)
-    return timeline, by_frame, poses, extra
+def csv_rows_text(text):
+    return list(csv.DictReader((text or "").splitlines()))
+
+
+@functools.cache
+def people(name, action, motion_filter=None, no_sound=False):
+    """(timeline, people per sampled frame, poses, inputs) for a clip, labelled for the action
+    from the model output the detector saved (so this runs the detector first if needed)."""
+    run(action, [name], *(["--motion", motion_filter] if motion_filter else []), *(["--no-sound"] if no_sound else []))
+    va = VideoAnalysis(mf.path(name), SETTINGS, cache=OUT)
+    extra = va.inputs(action, motion_filter, not no_sound)
+    timeline, by_frame = actions.label_people(va.poses, action, extra)
+    return timeline, by_frame, va.poses, extra
+
+
+def searcher(config=None, **kw):
+    """A Searcher on the tests' model output folder."""
+    return search.Searcher(config or characteristics.load_config(), SETTINGS, OUT, **kw)
 
 
 def overlap(a, b):
@@ -113,10 +137,10 @@ def track_person(name, action, who):
     seconds, view, persons, truth = mf.MOVEMENT[name]
     timeline, by_frame, _, _ = people(name, action)
     fps = float(timeline["fps"])
-    hidden = actions._occluded(timeline) | actions._at_edge(timeline)  # not measured on purpose
+    hidden = motion.occluded(timeline) | motion.at_edge(timeline)  # not measured on purpose
     out = []
     for t, frame in zip(timeline["t"].tolist(), by_frame):
-        when = actions.picture_time(t, fps)
+        when = media.picture_time(t, fps)
         boxes = {k: mf.box(view, p, when) for k, p in persons.items()}
         pairs = sorted(((overlap(bx, _xyxy(p["box"])), k, i) for k, bx in boxes.items() for i, p in enumerate(frame)),
                        reverse=True)

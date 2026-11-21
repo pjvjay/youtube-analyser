@@ -1,6 +1,6 @@
 """Build the results/ files from a detector run.
 
-Joins the detector's sections (standing/output/segments.csv, and intro.csv for standing before
+Joins the detector's sections (output/segments.csv, and intro.csv for standing before
 the interview starts) with the manual review (results/verdicts.csv) and the episode titles
 (analysis/videos.csv). Sections that have no verdict yet are listed as "not reviewed".
 
@@ -9,28 +9,28 @@ Writes results/standing_sections.csv (standing during the interviews), outside_i
 both are left out of the main list), interview_starts.csv and README.md.
 
 With --action (sitting, walking, jumping, smiling, talking, silent) it reads
-standing/output/<action>/ and results/<action>/verdicts.csv (optional until you have reviewed
+output/<action>/ and results/<action>/verdicts.csv (optional until you have reviewed
 some sections) and writes the same files to results/<action>/, named <action>_sections.csv and
 so on. For talking and silent it also writes speech.csv (who spoke when, from the sound) and
 voices.csv (each video's voices), with episode titles.
 
-Usage (from the youtube-analyser folder):
-    .venv/bin/python standing/make_report.py
-    .venv/bin/python standing/make_report.py --action talking
+From the command line: `yta report` (standing) or `yta report --action talking`.
 """
-import argparse
 import csv
-from collections import Counter, defaultdict
+import sys
+from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "standing" / "output"
-RESULTS = ROOT / "results"
+from .actions import ACTIONS as _ACTIONS
+
+OUT = Path("output")
+RESULTS = Path("results")
+INVENTORY = Path("analysis") / "videos.csv"
 FIELDS = ["upload_date", "video", "title", "start", "end", "duration_s", "start_s", "end_s",
           "people_standing", "verdict", "note", "youtube"]
 START_FIELDS = ["upload_date", "video", "title", "interview_start", "interview_start_s", "how"]
 AFTER = "after the interview"  # verdict for standing in material played after the interview
-ACTIONS = ["standing", "sitting", "walking", "running", "jumping", "smiling", "talking", "silent"]  # as in detect_standing
+ACTIONS = list(_ACTIONS)
 NOTES = ["voices", "voices_heard", "judged_by"]  # extra section columns some actions have
 
 
@@ -46,27 +46,29 @@ def save(path, fields, rows):
         w.writerows(rows)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--action", choices=ACTIONS, default="standing")
-    ap.add_argument("--detector-output", type=Path, default=OUT, help="detect_standing.py's --out (default standing/output)")
-    ap.add_argument("--results", type=Path, default=RESULTS, help="where to write (default results/)")
-    ap.add_argument("--inventory", type=Path, default=ROOT / "analysis" / "videos.csv",
-                    help="the video list with titles (default analysis/videos.csv)")
-    args = ap.parse_args()
-    action = args.action
-    out = args.detector_output if action == "standing" else args.detector_output / action
-    results = args.results if action == "standing" else args.results / action
+def make_report(action="standing", detector_output=OUT, results=RESULTS, inventory=INVENTORY, log=print):
+    """Write the results files for an action (see above). Without an inventory, titles and
+    upload dates are left empty (and the hours are not counted)."""
+    detector_output, results, inventory = Path(detector_output), Path(results), Path(inventory)
+    out = detector_output if action == "standing" else detector_output / action
+    results = results if action == "standing" else results / action
+    if not (out / "segments.csv").exists():
+        raise FileNotFoundError(f"no detector output in {out}: run yta detect first")
     fields = [f if f != "people_standing" else f"people_{action}" for f in FIELDS]
     if action != "standing":
         with open(out / "segments.csv", newline="") as f:
             header = csv.DictReader(f).fieldnames or []
         notes = [n for n in NOTES if n in header]
         fields = fields[:fields.index("verdict")] + notes + fields[fields.index("verdict"):]
-    videos = {r["file"]: r for r in load(args.inventory)}
+    if inventory.exists():
+        videos = {r["file"]: r for r in load(inventory)}
+    else:
+        log(f"no inventory at {inventory}: titles and dates are left empty", file=sys.stderr)
+        videos = {}
     verdict_file = results / "verdicts.csv"
-    verdicts = {(r["video"], float(r["start_s"])): r
-                for r in (load(verdict_file) if action == "standing" or verdict_file.exists() else [])}
+    if not verdict_file.exists():
+        log(f"no review yet ({verdict_file}): every section is listed as not reviewed", file=sys.stderr)
+    verdicts = {(r["video"], float(r["start_s"])): r for r in (load(verdict_file) if verdict_file.exists() else [])}
     sections, dropped = load(out / "segments.csv"), load(out / "dropped.csv")
     intro, starts = load(out / "intro.csv"), load(out / "interview_starts.csv")
     analysed = sorted(p.stem for p in (out / "segments").glob("*.csv"))
@@ -99,7 +101,7 @@ def main():
     save(results / "interview_starts.csv", START_FIELDS, start_rows)
 
     by_stem = {Path(f).stem: r for f, r in videos.items()}
-    hours = sum(float(by_stem[stem]["duration_min"]) for stem in analysed if stem in by_stem) / 60
+    hours = sum(float(by_stem[stem]["duration_min"] or 0) for stem in analysed if stem in by_stem) / 60
     count = Counter(r["verdict"] for r in rows)
     if action != "standing":
         voices = []
@@ -114,7 +116,7 @@ def main():
                                                                  k not in ("upload_date", "title")], found)
         (results / "README.md").write_text(action_readme(action, rows, intro_rows, after_rows, dropped, start_rows,
                                                          len(analysed), hours, count, voices))
-        print(f"{len(rows)} sections ({dict(count)}) -> {results / f'{action}_sections.csv'}, {results / 'README.md'}")
+        log(f"{len(rows)} sections ({dict(count)}) -> {results / f'{action}_sections.csv'}, {results / 'README.md'}")
         return
     good = [r for r in rows if r["verdict"] in ("confirmed", "unclear")]
     confirmed = [r for r in rows if r["verdict"] == "confirmed"]
@@ -126,9 +128,9 @@ def main():
     md = [
         "# Where someone is standing during the interviews: results for the downloaded videos",
         "",
-        "Generated by `standing/make_report.py`. Local only: this file names the videos.",
+        "Generated by `yta report`. Local only: this file names the videos.",
         "",
-        f"The standing detector (`standing/detect_standing.py`) analysed **{len(analysed)} videos "
+        f"The standing detector (`yta detect`) analysed **{len(analysed)} videos "
         f"({hours:.1f} hours)** at 1 frame per second. Only standing **during the interviews** is "
         "listed: each episode's intro (cold-open teaser, title sequence, sponsor ad, logo card) is "
         "found automatically and left out, and so is anything played after the interview. After "
@@ -160,7 +162,7 @@ def main():
         "## Left out: before and after the interview",
         "",
         f"- **Intros: {len(intro_rows)} sections** in {len({r['video'] for r in intro_rows})} episodes "
-        "(title sequences and cold-open teasers). `standing/intro.py` finds where each interview "
+        "(title sequences and cold-open teasers). `yta intro` (intro.py) finds where each interview "
         "starts: title sequences, ads and logo cards are shared by many episodes, so the interview "
         "starts after the last stretch of footage the episode shares with 3 or more other episodes. "
         "Episodes whose titles are unique to them use the first stretch of camera angles that recur "
@@ -215,12 +217,12 @@ def main():
     md += ["", "## Dropped as still figures", "",
            f"{len(dropped)} sections were dropped automatically because the figure's pixels never "
            "changed (statues, posters, artwork). They are listed in "
-           "`standing/output/dropped.csv`; all were checked and none was a real person.", ""]
+           "`output/dropped.csv`; all were checked and none was a real person.", ""]
     (results / "README.md").write_text("\n".join(md))
-    print(f"{len(rows)} sections ({dict(count)}) -> {results / 'standing_sections.csv'}, {results / 'README.md'}")
+    log(f"{len(rows)} sections ({dict(count)}) -> {results / 'standing_sections.csv'}, {results / 'README.md'}")
 
 
-WHAT = {  # how each action is found, and what it misses; see standing/README.md for the details
+WHAT = {  # how each action is found, and what it misses; see docs/actions.md for the details
     "sitting": "the pose model's leg geometry (the standing detector's rules): a thigh level or sideways, "
                "or every visible leg bent, and no leg straight and upright. Only people whose hips and "
                "knees are in view can be judged, so close-ups are never reported.",
@@ -255,9 +257,9 @@ def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_v
     md = [
         f"# Where someone is {action} during the interviews: results for the downloaded videos",
         "",
-        f"Generated by `standing/make_report.py --action {action}`. Local only: this file names the videos.",
+        f"Generated by `yta report --action {action}`. Local only: this file names the videos.",
         "",
-        f"`standing/detect_standing.py --action {action}` analysed **{n_videos} videos ({hours:.1f} hours)**. "
+        f"`yta detect --action {action}` analysed **{n_videos} videos ({hours:.1f} hours)**. "
         f"It finds {action} from {WHAT[action]}",
         "",
         f"Only sections **during the interviews** are listed: {len(intro_rows)} in the intros (found "
@@ -277,7 +279,7 @@ def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_v
     ]
     if count["not reviewed"]:
         md += [f"{count['not reviewed']} sections are not reviewed yet. Watch them (for example with "
-               f"`standing/review_video.py --action {action}`) and add a row per section to "
+               f"`yta review --action {action}`) and add a row per section to "
                f"`results/{action}/verdicts.csv` (`video,start_s,verdict,note`; verdicts `confirmed`, "
                f"`unclear`, `false alarm` or `{AFTER}`), then run this again.", ""]
     if confirmed:
@@ -311,6 +313,3 @@ def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_v
                for r in rows if r["verdict"] == "false alarm"]
     return "\n".join(md + [""])
 
-
-if __name__ == "__main__":
-    main()

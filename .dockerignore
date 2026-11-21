@@ -1,20 +1,8 @@
-# Only the Dockerfile's COPY sources are needed; keep the 6.8 GB of videos and secrets out of the build context
+# Only what the Dockerfile copies; keep videos, results, caches and secrets out of the build context
 *
-!standing/detect_standing.py
-!standing/intro.py
-!standing/actions.py
-!standing/audio.py
-!standing/people.py
-!standing/search.py
-!standing/people.toml
-!standing/models/intro_bank.npz
-!standing/requirements.txt
-!standing/models/yolo11s-pose.onnx
-!standing/models/face_landmark.onnx
-!standing/models/face_expression.onnx
-!standing/models/voice_activity.onnx
-!standing/models/voice_embedding.onnx
-!standing/models/person_mask.onnx
-!standing/models/gender_age.onnx
-!service/app.py
-!service/requirements.txt
+!pyproject.toml
+!README.md
+!src/
+!intro_bank.npz
+src/**/__pycache__
+src/*.egg-info

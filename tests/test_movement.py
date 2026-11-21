@@ -13,7 +13,7 @@ same for a second either side, since speeds are measured over time), the detecto
 must be the truth or "unknown" (it may decline, never be wrong), and each person must get a
 verdict often enough. Sections must be where the truth says, and nowhere else.
 
-    .venv/bin/python -m unittest tests.test_movement -v      (first run about 5 minutes)
+    pytest tests/test_movement.py      (first run about 5 minutes)
 """
 import unittest
 
@@ -101,7 +101,7 @@ class Walking(unittest.TestCase):
 
     def test_standing_still_leaves_out_the_walker(self):
         _, by_any, _, _ = h.people("walk_stop_walk", "standing")
-        _, by_still, _, _ = h.people("walk_stop_walk", "standing", motion="still")
+        _, by_still, _, _ = h.people("walk_stop_walk", "standing", motion_filter="still")
         walking = [f for f, people in enumerate(by_still) if any(p["state"] == "walking" for p in people)]
         self.assertTrue(walking)
         for f in walking:

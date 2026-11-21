@@ -23,13 +23,15 @@ import time
 def main(argv):
     with open(os.environ["FAKE_LOG"], "a") as f:
         f.write(json.dumps(argv) + "\n")
-    channel = json.load(open(os.environ["FAKE_CHANNEL"]))
+    with open(os.environ["FAKE_CHANNEL"]) as f:
+        channel = json.load(f)
     url = argv[-1]
     if "--flat-playlist" in argv:
         m = re.search(r"/(videos|shorts|streams)$", url)
         tab = m.group(1) if m else "videos"
         entries = [{"_type": "url", "id": v["id"], "title": v["title"], "duration": v.get("duration"),
-                    "url": f"https://www.youtube.com/watch?v={v['id']}"}
+                    "url": f"https://www.youtube.com/watch?v={v['id']}", **({"live_status": v["live"]} if v.get("live") else {}),
+                    **({"upload_date": v["upload_date"]} if v.get("listed_date") else {})}
                    for v in channel["videos"] if v.get("tab", "videos") == tab]
         print(json.dumps({"_type": "playlist", "id": "UCfake", "title": f"Fake channel - {tab}", "entries": entries}))
         return 0
@@ -51,8 +53,8 @@ def main(argv):
     template = opt("--print").split(":", 1)[1]
     duration = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", out],
                               capture_output=True, text=True).stdout.strip()
-    print(template.replace("%(filepath)s", out).replace("%(upload_date)s", video["upload_date"])
-          .replace("%(duration)s", duration).replace("%(title)s", video["title"]))
+    values = {"filepath": out, "upload_date": video["upload_date"], "duration": float(duration), "title": video["title"]}
+    print(re.sub(r"%\((\w+)\)j", lambda m: json.dumps(values[m.group(1)]), template))   # yt-dlp's JSON fields
     return 0
 
 

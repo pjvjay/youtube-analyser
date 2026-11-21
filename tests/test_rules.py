@@ -4,15 +4,15 @@ Each test builds what the models would have measured (people's body points, the 
 movement, mouth movement, what the sound heard, voice fingerprints) and checks the rule's
 verdict, including the edge cases the rules were written for.
 
-    .venv/bin/python -m unittest tests.test_rules -v
+    pytest tests/test_rules.py
 """
 import itertools
 import unittest
 
-import numpy as np
 import cv2
+import numpy as np
 
-from tests.helpers import actions, audio, characteristics, mf, search
+from tests.helpers import audio, characteristics, faces, mf, motion, query
 
 SOURCES = mf.SOURCES
 
@@ -82,22 +82,22 @@ def zoomed(p, s, cx=W / 2, cy=H / 2):
 class Walking(unittest.TestCase):
     def speeds(self, frames, **camera):
         poses = poses_of(frames)
-        return actions.label_motion(poses, camera_of(poses, **camera)), poses
+        return motion.label_motion(poses, camera_of(poses, **camera)), poses
 
     def test_standing_still_is_still(self):
         speed, _ = self.speeds([[body(120 + 0.5 * (f % 2))] for f in range(6)])  # half-pixel jitter
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "still")
+            self.assertEqual(motion.motion_state(s), "still")
 
     def test_walking_is_walking_at_the_right_speed(self):
         speed, _ = self.speeds([[body(40 + 1.5 * TORSO * f)] for f in range(5)])
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "walking")
+            self.assertEqual(motion.motion_state(s), "walking")
             self.assertAlmostEqual(s, 1.5, delta=0.05)
 
     def test_brisk_walk_is_walking_not_running(self):
         speed, _ = self.speeds([[body(20 + 3.0 * TORSO * f)] for f in range(3)])
-        self.assertEqual(actions.motion_state(speed[1]), "walking")
+        self.assertEqual(motion.motion_state(speed[1]), "walking")
 
     def test_a_runner_between_samples_is_not_called_walking(self):
         # 6 torso lengths a second is too far to follow between 1-fps samples: unknown, not walking
@@ -108,20 +108,20 @@ class Walking(unittest.TestCase):
         # still, then running: the sample in between saw one still second and one too far to follow
         xs = [30, 30, 30 + 0.5 * 6 * TORSO, 30 + 1.5 * 6 * TORSO]
         speed, poses = self.speeds([[body(x)] for x in xs])
-        self.assertNotEqual(actions.motion_state(speed[2]), "walking")
+        self.assertNotEqual(motion.motion_state(speed[2]), "walking")
 
     def test_camera_panning_past_someone_standing(self):
         # the camera pans right 40 px a second: the person slides left in the picture
         frames = [[body(200 - 40 * f)] for f in range(4)]
         speed, _ = self.speeds(frames, shift=[(-40, 0)] * 4)
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "still")
+            self.assertEqual(motion.motion_state(s), "still")
 
     def test_camera_following_a_walker(self):
         # he stays put in the picture while the picture moves 1.5 torso lengths a second
         speed, _ = self.speeds([[body(120)] for f in range(4)], shift=[(-1.5 * TORSO, 0)] * 4)
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "walking")
+            self.assertEqual(motion.motion_state(s), "walking")
             self.assertAlmostEqual(s, 1.5, delta=0.05)
 
     def test_zooming_in_on_someone_standing(self):
@@ -132,19 +132,19 @@ class Walking(unittest.TestCase):
             torso *= 1.1
         speed, _ = self.speeds(frames, scale=[1.1] * 4)
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "still")
+            self.assertEqual(motion.motion_state(s), "still")
 
     def test_walking_towards_the_camera(self):
         # 1.5 torso lengths a second from 10 torso lengths away: grows as distance shrinks
-        focal = actions.FOCAL_H * H
+        focal = motion.FOCAL_H * H
         frames = [[body(128, 70, focal / (10.0 - 1.5 * f))] for f in range(3)]
         speed, _ = self.speeds(frames)
-        self.assertEqual(actions.motion_state(speed[1]), "walking")
+        self.assertEqual(motion.motion_state(speed[1]), "walking")
 
     def test_size_jitter_is_not_walking_towards_the_camera(self):
         speed, _ = self.speeds([[body(128, 70, TORSO * (1.06 if f % 2 else 1.0))] for f in range(5)])
         for s in speed[1:-1]:
-            self.assertEqual(actions.motion_state(s), "still")
+            self.assertEqual(motion.motion_state(s), "still")
 
     def test_nobody_is_followed_across_a_cut(self):
         speed, _ = self.speeds([[body(60)], [body(60 + 1.5 * TORSO)], [body(60 + 3 * TORSO)]], response=[0, 0.0, 0.0])
@@ -155,7 +155,7 @@ class Walking(unittest.TestCase):
         frames = [[body(60 + 1.5 * TORSO * f), body(200 - 1.5 * TORSO * f)] for f in range(4)]
         poses = poses_of(frames)
         looks = [[100.0] * 24 if i % 2 == 0 else [160.0] * 24 for i in range(len(poses["frame"]))]
-        speed = actions.label_motion(poses, camera_of(poses, looks=looks))
+        speed = motion.label_motion(poses, camera_of(poses, looks=looks))
         for j in range(2, 6):
             self.assertAlmostEqual(speed[j], 1.5, delta=0.1)
 
@@ -169,9 +169,9 @@ class Walking(unittest.TestCase):
         frames = [[body(100 + 1.5 * TORSO * f), body(100 + 0.8 * TORSO + 1.5 * TORSO * f)] for f in range(3)]
         poses = poses_of(frames)
         looks = [[100.0] * 24 if i % 2 == 0 else [160.0] * 24 for i in range(len(poses["frame"]))]
-        speed = actions.label_motion(poses, camera_of(poses, looks=looks))
-        self.assertEqual(actions.motion_state(speed[2]), "walking")
-        self.assertEqual(actions.motion_state(speed[3]), "walking")
+        speed = motion.label_motion(poses, camera_of(poses, looks=looks))
+        self.assertEqual(motion.motion_state(speed[2]), "walking")
+        self.assertEqual(motion.motion_state(speed[3]), "walking")
 
     def test_someone_hidden_behind_another_is_not_measured(self):
         frames = [[body(100), body(105)] for f in range(3)]
@@ -181,14 +181,14 @@ class Walking(unittest.TestCase):
     def test_speed_from_one_side_counts_when_the_other_side_is_empty(self):
         # he walks for two samples, then the shot ends (nobody left unmatched): the last link counts
         speed, _ = self.speeds([[body(60 + 1.5 * TORSO * f)] for f in range(2)])
-        self.assertEqual(actions.motion_state(speed[1]), "walking")
+        self.assertEqual(motion.motion_state(speed[1]), "walking")
 
 
 # ---- running and jumping in the 5-fps samples -------------------------------------------------
 
 class Running(unittest.TestCase):
     def states(self, xs, seated=None, **camera):
-        people = actions.label_runs(dense_of([[body(x)] for x in xs], **camera), seated=seated)
+        people = motion.label_runs(dense_of([[body(x)] for x in xs], **camera), seated=seated)
         return [p[0]["state"] for p in people], [p[0]["m"].get("speed", np.nan) for p in people]
 
     def test_running(self):
@@ -232,7 +232,7 @@ class Jumping(unittest.TestCase):
         """rises[f]: body lift in torso lengths per 5-fps sample. -> states per sample."""
         xs = xs or [128.0] * len(rises)
         frames = [[body(x, 70 - r * TORSO)] for x, r in zip(xs, rises)]
-        return [p[0]["state"] for p in actions.label_jumps(dense_of(frames, **camera))]
+        return [p[0]["state"] for p in motion.label_jumps(dense_of(frames, **camera))]
 
     def test_a_jump_is_found_once(self):
         rises = [self.hop(f * 0.2, 1.0, 0.45) for f in range(15)]
@@ -262,7 +262,7 @@ class Jumping(unittest.TestCase):
         rises = [self.hop(f * 0.2, 1.0, 0.45) for f in range(15)]
         frames = [[body(70, 70 - r * TORSO), body(190, 70 - r * TORSO)] for r in rises]
         looks = [[100.0] * 24 if i % 2 == 0 else [160.0] * 24 for i in range(2 * len(rises))]
-        people = actions.label_jumps(dense_of(frames, looks=looks))
+        people = motion.label_jumps(dense_of(frames, looks=looks))
         for who in (0, 1):
             self.assertIn("jumping", [p[who]["state"] for p in people])
 
@@ -289,27 +289,27 @@ class Camera(unittest.TestCase):
 
     def test_pan_and_zoom_are_measured(self):
         for dx, s in ((0, 1.0), (12, 1.0), (-30, 1.0), (0, 1.08), (8, 1.05)):
-            got = actions.frame_motion(self.view(), self.view(dx, s), self.hann)
+            got = motion.frame_motion(self.view(), self.view(dx, s), self.hann)
             self.assertAlmostEqual(got[3], s, delta=0.01, msg=(dx, s))
             self.assertAlmostEqual(got[0], dx, delta=1.0, msg=(dx, s))
-            self.assertGreater(got[2], actions.CUT_RESPONSE)
+            self.assertGreater(got[2], motion.CUT_RESPONSE)
 
     def test_a_followed_person_does_not_hide_the_pan(self):
-        got = actions.frame_motion(self.view(person_at=100), self.view(30, person_at=100), self.hann,
+        got = motion.frame_motion(self.view(person_at=100), self.view(30, person_at=100), self.hann,
                                    [(100, 30, 40, 100)])
         self.assertAlmostEqual(got[0], 30, delta=1.0)
 
     def test_a_cut_has_a_low_response(self):
         other = cv2.GaussianBlur(np.random.default_rng(1).uniform(0, 255, (H, W)).astype(np.float32), (0, 0), 2)
-        self.assertLess(actions.frame_motion(self.view(), other, self.hann)[2], actions.CUT_RESPONSE)
+        self.assertLess(motion.frame_motion(self.view(), other, self.hann)[2], motion.CUT_RESPONSE)
 
     def test_a_step_out_of_line_is_smoothed(self):
         steps = np.array([[-32, 0, 0.5, 1], [-32, 0, 0.5, 1], [-1, 0, 0.5, 1], [-33, 0, 0.5, 1], [-32, 0, 0.5, 1]], float)
-        self.assertAlmostEqual(actions._smooth_steps(steps)[2, 0], -32, delta=1)
+        self.assertAlmostEqual(motion._smooth_steps(steps)[2, 0], -32, delta=1)
 
     def test_a_cut_is_not_smoothed_away(self):
         steps = np.array([[0, 0, 0.8, 1], [np.nan, np.nan, 0.0, 1], [40, 0, 0.8, 1]], float)
-        self.assertTrue(np.isnan(actions._smooth_steps(steps)[1, 0]))
+        self.assertTrue(np.isnan(motion._smooth_steps(steps)[1, 0]))
 
 
 # ---- talking and silent -------------------------------------------------------------------
@@ -321,38 +321,38 @@ def face(move, track=0):
 class Talkers(unittest.TestCase):
     def test_without_trusted_sound_the_mouth_decides(self):
         people = [face(0.2), face(0.05)]
-        actions._talkers(people, (False, 0.0, []))
+        faces._talkers(people, (False, 0.0, []))
         self.assertEqual([p["state"] for p in people], ["talking", "silent"])
         self.assertEqual(people[0]["m"]["by"], "face")
 
     def test_no_speech_means_silent_whatever_the_mouth_does(self):
         people = [face(0.3), face(0.2)]
-        actions._talkers(people, (True, 0.05, []))
+        faces._talkers(people, (True, 0.05, []))
         self.assertEqual([p["state"] for p in people], ["silent", "silent"])
 
     def test_one_voice_three_faces(self):
         people = [face(0.09), face(0.03), face(0.02)]
-        actions._talkers(people, (True, 0.9, [0]))
+        faces._talkers(people, (True, 0.9, [0]))
         self.assertEqual([p["state"] for p in people], ["talking", "silent", "silent"])
 
     def test_the_one_moving_most_talks(self):
         people = [face(0.09), face(0.11), face(0.02)]
-        actions._talkers(people, (True, 0.9, [0]))
+        faces._talkers(people, (True, 0.9, [0]))
         self.assertEqual([p["state"] for p in people], ["silent", "talking", "silent"])
 
     def test_two_voices_two_talkers(self):
         people = [face(0.09), face(0.10), face(0.02)]
-        actions._talkers(people, (True, 0.9, [0, 1]))
+        faces._talkers(people, (True, 0.9, [0, 1]))
         self.assertEqual([p["state"] for p in people], ["talking", "talking", "silent"])
 
     def test_two_people_talking_over_each_other_with_one_voice_heard(self):
         people = [face(0.25), face(0.20), face(0.02)]
-        actions._talkers(people, (True, 0.9, [0]))
+        faces._talkers(people, (True, 0.9, [0]))
         self.assertEqual([p["state"] for p in people], ["talking", "talking", "silent"])
 
     def test_a_listener_nodding_is_not_talking(self):
         people = [face(0.25), face(0.06)]
-        actions._talkers(people, (True, 0.9, [0]))
+        faces._talkers(people, (True, 0.9, [0]))
         self.assertEqual(people[1]["state"], "silent")
 
     def test_each_face_keeps_its_own_voice(self):
@@ -368,8 +368,8 @@ class Talkers(unittest.TestCase):
         frames.append([face(0.2, 0), face(0.2, 1)])
         sounds.append((True, 0.9, [0]))
         for people, sound in zip(frames, sounds):
-            actions._talkers(people, sound)
-        actions._name_voices(frames, sounds)
+            faces._talkers(people, sound)
+        faces._name_voices(frames, sounds)
         self.assertEqual(frames[0][0]["m"]["voice"], "A")
         self.assertEqual(frames[3][1]["m"]["voice"], "B")
         self.assertEqual([p["m"]["voice"] for p in frames[-1]], ["A", "B"])
@@ -381,7 +381,7 @@ class Talkers(unittest.TestCase):
         judged = [[{"j": 0, "state": "talking", "m": {}}], [{"j": 1, "state": "talking", "m": {}}],
                   [{"j": 2, "state": "talking", "m": {}}]]
         cam = camera_of(poses, response=[0, 0.9, 0.0])
-        actions._face_tracks(judged, poses, cam)
+        faces._face_tracks(judged, poses, cam)
         self.assertEqual(judged[0][0]["track"], judged[1][0]["track"])
         self.assertNotEqual(judged[1][0]["track"], judged[2][0]["track"])
 
@@ -523,7 +523,7 @@ class Colours(unittest.TestCase):
 
 class Queries(unittest.TestCase):
     def parse(self, q, names=()):
-        r = search.parse(q, CONFIG, names)
+        r = query.parse(q, CONFIG, names)
         return {k: v for k, v in r.items() if v}
 
     def test_the_asked_for_example(self):
@@ -556,39 +556,39 @@ class Queries(unittest.TestCase):
 
 
 class Verdicts(unittest.TestCase):
-    req = staticmethod(lambda q, names=(): search.parse(q, CONFIG, names))
+    req = staticmethod(lambda q, names=(): query.parse(q, CONFIG, names))
 
     def test_match_possible_no(self):
         q = self.req("woman with purple hair")
         seen = person(gender="female", gender_by="voice", hair=("purple", 0.9, 20))
-        self.assertEqual(search.check(seen, q, CONFIG)[0], "match")
-        self.assertEqual(search.check(person(gender="female", gender_by="voice"), q, CONFIG)[0], "possible")
-        self.assertEqual(search.check(dict(seen, gender="male"), q, CONFIG)[0], "no")
-        self.assertEqual(search.check(dict(seen, hair=("blue", 0.9, 20)), q, CONFIG)[0], "no")
+        self.assertEqual(query.check(seen, q, CONFIG)[0], "match")
+        self.assertEqual(query.check(person(gender="female", gender_by="voice"), q, CONFIG)[0], "possible")
+        self.assertEqual(query.check(dict(seen, gender="male"), q, CONFIG)[0], "no")
+        self.assertEqual(query.check(dict(seen, hair=("blue", 0.9, 20)), q, CONFIG)[0], "no")
         # a colour seen in under min_share of the samples is not decided
-        self.assertEqual(search.check(dict(seen, hair=("purple", 0.4, 20)), q, CONFIG)[0], "possible")
+        self.assertEqual(query.check(dict(seen, hair=("purple", 0.4, 20)), q, CONFIG)[0], "possible")
 
     def test_clothes_either_top_or_bottom(self):
         q = self.req("man wearing red")
-        self.assertEqual(search.check(person(gender="male", top=("white", 1, 5), bottom=("red", 1, 5)), q, CONFIG)[0], "match")
-        self.assertEqual(search.check(person(gender="male", top=("white", 1, 5)), q, CONFIG)[0], "no")
+        self.assertEqual(query.check(person(gender="male", top=("white", 1, 5), bottom=("red", 1, 5)), q, CONFIG)[0], "match")
+        self.assertEqual(query.check(person(gender="male", top=("white", 1, 5)), q, CONFIG)[0], "no")
 
     def test_voice_pitch(self):
         q = self.req("deep voice")
-        self.assertEqual(search.check(person(voice=0, voice_f0=110.0), q, CONFIG)[0], "match")
-        self.assertEqual(search.check(person(voice=0, voice_f0=200.0), q, CONFIG)[0], "no")
-        self.assertEqual(search.check(person(voice=0, voice_f0=147.0), q, CONFIG)[0], "no")   # in between
-        self.assertEqual(search.check(person(), q, CONFIG)[0], "possible")                   # never heard
+        self.assertEqual(query.check(person(voice=0, voice_f0=110.0), q, CONFIG)[0], "match")
+        self.assertEqual(query.check(person(voice=0, voice_f0=200.0), q, CONFIG)[0], "no")
+        self.assertEqual(query.check(person(voice=0, voice_f0=147.0), q, CONFIG)[0], "no")   # in between
+        self.assertEqual(query.check(person(), q, CONFIG)[0], "possible")                   # never heard
 
     def test_a_name_by_voice_or_by_description(self):
         q = self.req("Jane", ["Jane"])
-        self.assertEqual(search.check(person(voice=1, voice_name="Jane"), q, CONFIG)[0], "match")
-        self.assertEqual(search.check(person(voice=1, voice_name=None), q, CONFIG)[0], "no")
+        self.assertEqual(query.check(person(voice=1, voice_name="Jane"), q, CONFIG)[0], "match")
+        self.assertEqual(query.check(person(voice=1, voice_name=None), q, CONFIG)[0], "no")
         silent = person(gender="female", gender_by="face", hair=("purple", 1.0, 9))
-        self.assertEqual(search.check(silent, q, CONFIG)[0], "possible")
+        self.assertEqual(query.check(silent, q, CONFIG)[0], "possible")
         described = self.req("woman with purple hair")
-        self.assertEqual(search.check(silent, q, CONFIG, described)[0], "match")
-        self.assertEqual(search.check(dict(silent, hair=("black", 1.0, 9)), q, CONFIG, described)[0], "possible")
+        self.assertEqual(query.check(silent, q, CONFIG, described)[0], "match")
+        self.assertEqual(query.check(dict(silent, hair=("black", 1.0, 9)), q, CONFIG, described)[0], "possible")
 
     def test_the_voice_decides_gender_before_the_face(self):
         g = lambda f0, female: characteristics._gender({"voice_f0": f0, "female": female}, CONFIG)

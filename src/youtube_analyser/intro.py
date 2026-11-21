@@ -8,7 +8,7 @@ logo cards are the same in every episode of a season, so they are found by compa
 2. A thumbnail that matches a short moment (at most 15 s long) in 3 or more other episodes is
    title material. Requiring a short moment leaves out interview footage that a re-run or a
    compilation episode repeats, because a static interview shot matches minutes of footage.
-   These thumbnails are saved as a "bank" (models/intro_bank.npz), so a new video can be checked
+   These thumbnails are saved as a "bank" (intro_bank.npz), so a new video can be checked
    against it on its own. The bank is made from the videos, so it is built locally and not
    committed.
 3. The interview starts after the last run of title frames that begins in the first 150 s
@@ -22,21 +22,18 @@ logo cards are the same in every episode of a season, so they are found by compa
 
 Checked by eye on 210 test episodes (frames either side of the detected start).
 
-Usage (from the youtube-analyser folder):
-    .venv/bin/python standing/intro.py --build-bank *.mp4 *.mkv *.webm   # rebuild the bank
-    .venv/bin/python standing/intro.py 20240105_sampleVid01.mp4           # print interview starts
+From the command line: `yta intro --build-bank *.mp4` builds the bank, `yta intro video.mp4`
+prints where each interview starts.
 """
-import argparse
-import re
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
-DEFAULT_BANK = HERE / "models" / "intro_bank.npz"
+from .media import hms
+
+DEFAULT_BANK = Path("intro_bank.npz")    # in the folder the commands are run from
 
 W, H = 32, 18           # thumbnail size; enough to recognise a title card, too small to show detail
 OPENING_S = 240         # the interview started within the first 4 minutes in every episode
@@ -77,7 +74,7 @@ def body(path):
 
 
 def _flat(a):
-    return a.reshape(len(a), -1).astype(np.float32)
+    return a.reshape(len(a), int(np.prod(a.shape[1:]))).astype(np.float32)
 
 
 def _z(a):
@@ -115,7 +112,10 @@ def build_bank(openings):
     Videos under OPENING_S are left out: Shorts are cut from the interviews, so several Shorts
     of one episode would make an interview moment look shared.
     """
+    empty = {"thumbs": np.zeros((0, H, W), np.uint8), "count": np.zeros(0, np.int32), "second": np.zeros(0, np.int32)}
     names = sorted(n for n in openings if len(openings[n]) >= OPENING_S)
+    if not names:
+        return empty
     allt = np.concatenate([openings[n] for n in names])
     vid = np.concatenate([[k] * len(openings[n]) for k, n in enumerate(names)])
     sec = np.concatenate([np.arange(len(openings[n])) for n in names])
@@ -130,6 +130,8 @@ def build_bank(openings):
             count[i:i + 1024] += mv.any(1) & (last - first <= TIGHT_S) & (vid[i:i + 1024] != v)
     keep = (count >= SHARED_BY) | ((count >= 1) & (sec < PAIR_WITHIN_S))
     t, c, s = allt[keep], count[keep], sec[keep]
+    if not len(t):
+        return empty
     # drop near-duplicates (a static card shown for several seconds), keeping the widest-shared
     order = np.argsort(-c, kind="stable")
     t, c, s = t[order], c[order], s[order]
@@ -146,8 +148,15 @@ def build_bank(openings):
         taken[same] = True
         taken[i] = True
         out.append((t[i], c[i], min(s[same].min(initial=s[i]), s[i])))
+    if not out:
+        return empty
     return {"thumbs": np.stack([o[0] for o in out]), "count": np.array([o[1] for o in out], np.int32),
             "second": np.array([o[2] for o in out], np.int32)}
+
+
+def title_frames(bank):
+    """How many of the bank's thumbnails are title material (shared by SHARED_BY episodes)."""
+    return 0 if bank is None else int((bank["count"] >= SHARED_BY).sum())
 
 
 def load_bank(path=DEFAULT_BANK):
@@ -195,30 +204,22 @@ def interview_start(path, bank, first=None):
     return {"interview_start_s": start, "title_end_s": 0, "how": "shared" if start else "none"}
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("videos", nargs="+", type=Path)
-    ap.add_argument("--bank", type=Path, default=DEFAULT_BANK)
-    ap.add_argument("--build-bank", action="store_true", help="rebuild the bank from these videos")
-    args = ap.parse_args()
-    videos = [v for v in args.videos if not re.search(r"\.f\d+$", v.stem)]
-    if args.build_bank:
-        with ThreadPoolExecutor(4) as ex:
-            openings = dict(zip([v.name for v in videos], ex.map(opening, videos)))
-        bank = build_bank(openings)
-        args.bank.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(args.bank, **bank)
-        used = sum(len(o) >= OPENING_S for o in openings.values())
-        print(f"{len(bank['count'])} thumbnails ({(bank['count'] >= SHARED_BY).sum()} title) from "
-              f"{used} videos of {OPENING_S // 60} minutes or more -> {args.bank}")
-        return
-    bank = load_bank(args.bank)
-    if bank is None:
-        sys.exit(f"no bank at {args.bank}; build one with --build-bank")
-    for v in videos:
-        r = interview_start(v, bank)
-        print(f"{v.name}\t{r['interview_start_s']}\t{r['how']}", flush=True)
+def build_bank_from(videos, threads=4):
+    """The bank from these videos' openings (read a few at a time)."""
+    with ThreadPoolExecutor(threads) as ex:
+        openings = dict(zip([Path(v).name for v in videos], ex.map(opening, videos)))
+    return build_bank(openings), sum(len(o) >= OPENING_S for o in openings.values())
 
 
-if __name__ == "__main__":
-    main()
+def save_bank(path, bank):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **bank)
+
+
+def start_row(path, bank):
+    """interview_start() as a row of interview_starts.csv; the whole video is the interview
+    without a bank."""
+    r = interview_start(path, bank) if bank is not None else \
+        {"interview_start_s": 0, "title_end_s": 0, "how": "intro kept"}
+    return {"video": Path(path).name, **r, "interview_start": hms(r["interview_start_s"])}

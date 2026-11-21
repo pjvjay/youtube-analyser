@@ -1,25 +1,32 @@
 # Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -t . -v     # all of them
-.venv/bin/python -m unittest tests.test_rules -v           # the rules only: seconds, no video
+pytest                                              # all of them
+pytest tests/test_rules.py tests/test_units.py      # the rules and small pieces: seconds, no video
+pytest --cov --cov-report=term-missing              # with coverage of the package
 ```
 
-The first full run builds the test clips and runs the detector on them (10-25 minutes on a
+The first full run builds the test clips and runs the models on them (10-30 minutes on a
 4-core machine); later runs reuse both from `tests/.cache/` and take a few minutes. Delete that
-folder to start again. Only the standard library's `unittest` is needed (`pytest tests` works
-too, if you have it).
+folder to start again. The commands are run in the test process (`helpers.yta`), so the models
+load once and coverage sees everything. The Azure tests start the Azurite storage emulator when
+it is installed (`npm install -g azurite`, or `AZURITE=/path/to/azurite`), or use the account in
+`AZURE_STORAGE_CONNECTION_STRING`; without either they are skipped.
 
 | File | What it checks | Needs |
 |---|---|---|
-| `test_rules.py` | Every decision rule on made-up measurements: walking, running and jumping from body points and camera movements; the camera measurement itself; talking and silent from mouth movement and what the sound heard; whose voice is whose; speech detection, how clear the sound is, and how voices are grouped; for the search, naming colours, reading queries, the match / possible / no verdicts, gender from voice before face, voting over a person's samples, following people through a shot, pitch, and naming voices | nothing (seconds) |
-| `test_standing.py` | Standing is exactly as before: the original code (git commit `7bf602d`) and the current one agree on 240 made-up pose sequences (a golden file) and write byte-identical files on two clips | git history for the second |
+| `test_rules.py` | Every decision rule on made-up measurements: walking, running and jumping from body points and camera movements; the camera measurement itself; talking and silent from mouth movement and what the sound heard; whose voice is whose; speech detection, how clear the sound is, and how voices are grouped; for the search, naming colours, reading queries, the match / possible / no verdicts, gender from voice before face, voting over a person's samples, following people through a shot (and not between two hair colours), pitch, and naming voices | nothing (seconds) |
+| `test_units.py` | File names and links; videos that are not videos, sideways phone videos (read upright), keyframes; the intro bank with no shared titles; votes decided the same whatever Python's hash seed; yt-dlp's listings and downloads through a stand-in (dates, live streams, titles with tabs, cookies, a silent copy downloaded again for its sound, failures); the channel report | ffmpeg (seconds) |
+| `test_standing.py` | Standing is exactly as before: the original code (git commit `7bf602d`) and the current one agree on 240 made-up pose sequences (a golden file), and the original script and `yta detect` write the same files on two clips, byte for byte (the saved model output holds the same arrays plus a record of what made it) | git history for the second |
 | `test_movement.py` | Walking, running and jumping end to end on 19 made clips | the models |
 | `test_talking.py` | Up to three people talking, with and without usable sound, and voices across cuts | the models |
 | `test_sound.py` | Speech and voices on real speech: one, two and three voices, crowd noise, silence, a brief extra voice, no sound | the models |
 | `test_search.py` | Searching for people by hair colour, clothes, apparent gender, voice and an enrolled name, with and without an action, on made clips of a woman (hair dyed purple or blue, or natural) and a man taking turns to talk, and on the street clips; an action alone gives the detector's sections; a video where nobody has the colour asked for stops after the colours (no faces, sound or camera pass); the quick look at keyframes; the face model run only on the few faces needed; the command line and its files | the models |
-| `test_channel.py` | A whole channel through `channel.py`, with `fake_yt_dlp.py` standing in for yt-dlp (five videos): the report's YouTube links and timestamps, the quick look ending the search in videos without the colour, 144p formats with sound only when needed (and downloading again with sound when a later query needs it), the inventory, carrying on after a stop, reusing videos for a new query, `--max-videos`, `--since`, a failed download, `--delete-videos`, a folder of videos; and five 4-minute episodes sharing a title sequence, whose results there are set apart as intro | the models, ffmpeg's `life` test source |
-| `test_tools.py` | Every action through the command line; skipping and `--reclassify`; a broken file; the reports and the review video; the HTTP API against the command line, including `who=` with a person enrolled from a recording | the models, uvicorn |
+| `test_channel.py` | A whole channel through `yta channel`, with `fake_yt_dlp.py` standing in for yt-dlp (five videos): the report's YouTube links and timestamps, the quick look ending the search in videos without the colour, 144p formats with sound only when needed (and downloading again with sound when a later query needs it), the inventory, carrying on after a stop, reusing videos for a new query, `--max-videos`, `--since`, a failed download, `--delete-videos`, a folder of videos; and five 4-minute episodes sharing a title sequence, whose results there are set apart as intro | the models, ffmpeg's `life` test source |
+| `test_cli.py` | Every action through `yta detect`; skipping and `--reclassify`; a broken file, a duplicate name and yt-dlp's part files; model output made again when a setting changes; `--motion` and `--no-sound`; the intro bank built and used; the reports (with and without an inventory) and the review videos; errors, help and `python -m youtube_analyser` | the models |
+| `test_service.py` | The HTTP API in-process with its own worker: the same sections as the command line, `who=` (and Jane enrolled from a recording), a broken upload, errors, deleting, uploads too big, a restart with uploads left waiting, results expiring | the models, FastAPI |
+| `test_cloud.py` | Every Store (a folder, Azure Blob) and every Queue (in memory, a folder, Azure Queue) against the same checks; URLs and plugins; Azure's sign-in without a connection string; the same Worker analysing an upload through each; a channel search spread over workers giving the same moments as one machine, with a failing video retried then reported, enrolled voices and the intro bank travelling with it, and the command line starting and collecting it | the models, Azurite for the Azure cases |
+| `test_edges.py` | Videos with nobody in them; portrait videos; model output saved by an older version (used) or for a replaced video (made again); models shared between threads; enrolment problems; searches with no sound and no face model; a channel folder with dates, shards and a changed query | the models |
 
 ## What is covered
 
@@ -63,11 +70,11 @@ and none wrong.
 of their own):
 
 ```bash
-DETECTOR_OPTIONS="--imgsz 320" .venv/bin/python -m unittest tests.test_movement tests.test_talking tests.test_search tests.test_channel
+DETECTOR_OPTIONS="--imgsz 320" pytest tests/test_movement.py tests/test_talking.py tests/test_search.py tests/test_channel.py
 ```
 
-With `--imgsz 320` (what `channel.py --speed fastest` uses) all of these passed. With
-`--imgsz 480`, and with the smaller model (`--model standing/models/yolo11n-pose.onnx`), two
+With `--imgsz 320` (what `yta channel --speed fastest` uses) all of these passed. With
+`--imgsz 480`, and with the smaller model (`--model yolo11n-pose.onnx`), two
 talking tests fell just short of their thresholds (talkers found in 14 of 20 seconds where 15
 were needed); the smaller model at 320 also called a man standing still walking while the
 camera panned. So 320 with the usual model is the faster setting offered, with the caveat that
@@ -94,5 +101,8 @@ That needs the review in `docs/running.md` step 5.
 | `speech_a.ogg` ... `speech_d.ogg` | Four people's speech (speakers FEE078, MEO069, FEE083, MEE009), pauses removed, Opus 48 kbps | AMI Meeting Corpus excerpts shipped in the `pyannote.audio` 4.0.7 source package (AMI: CC BY 4.0) |
 | `../standing_golden.json` | Fingerprints of the original standing code's output | made by `python -m tests.test_standing --make-golden` |
 
-`make_fixtures.py` builds every clip from these, deterministically. When you change a clip,
+`make_fixtures.py` builds every clip from these, deterministically (the woman's mouth is
+opened with the package's own face models). `fake_yt_dlp.py` stands in for yt-dlp: it lists a
+channel described in a JSON file and "downloads" by copying clips, so the channel tests need no
+internet. When you change a clip,
 bump its `VERSION` so cached clips and results are rebuilt.

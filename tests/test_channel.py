@@ -1,4 +1,4 @@
-"""Searching a whole channel, end to end (standing/channel.py), with a stand-in for yt-dlp.
+"""Searching a whole channel, end to end (`yta channel`), with a stand-in for yt-dlp.
 
 The "channel" (fake_yt_dlp.py) has five videos, newest first: duo_purple, duo_natural, solo_blue
 (see test_search.py), two_cross (two men crossing a street) and jump_three (a man jumping three
@@ -6,7 +6,7 @@ times). "Downloading" copies the clip, without its sound when the format asks fo
 YouTube itself is not reached: what is tested is everything around it (listing, formats, dates,
 resuming, failures, the report and its links).
 
-    .venv/bin/python -m unittest tests.test_channel -v      (about 3 minutes)
+    pytest tests/test_channel.py      (about 3 minutes)
 """
 import csv
 import json
@@ -34,25 +34,34 @@ def setUpModule():
     tmp = Path(state["tmp"].name)
     videos = [{"id": i, "title": t, "upload_date": d, "clip": str(mf.build(c))} for i, t, d, c in CHANNEL]
     (tmp / "channel.json").write_text(json.dumps({"videos": videos}))
-    state["env"] = dict(os.environ, FAKE_CHANNEL=str(tmp / "channel.json"), FAKE_LOG=str(tmp / "calls.log"))
+    state["env"] = {"FAKE_CHANNEL": str(tmp / "channel.json"), "FAKE_LOG": str(tmp / "calls.log")}
 
 
 def tearDownModule():
     state["tmp"].cleanup()
 
 
+FAKE = f"{sys.executable} {h.REPO / 'tests' / 'fake_yt_dlp.py'}"
+
+
 def channel(query, work, *options, source=URL, fail=""):
-    """Run channel.py; returns (stdout, the search folder, the yt-dlp calls made)."""
+    """Run `yta channel` (yt-dlp being the stand-in); returns (stdout, the search folder, the
+    yt-dlp calls made)."""
     log = Path(state["env"]["FAKE_LOG"])
     log.unlink(missing_ok=True)
-    cmd = [sys.executable, str(h.REPO / "standing" / "channel.py"), source, query, "--work", str(work),
-           "--yt-dlp", f"{sys.executable} {h.REPO / 'tests' / 'fake_yt_dlp.py'}", *options]
+    argv = ["channel", source, query, "--work", work, "--yt-dlp", FAKE, *options]
     if "--speed" not in options and "--imgsz" in " ".join(h.OPTIONS):
-        cmd += ["--speed", "fastest"]
-    r = subprocess.run(cmd, capture_output=True, text=True, env=dict(state["env"], FAKE_FAIL=fail))
-    if r.returncode:
-        raise AssertionError(f"channel.py failed:\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
-    folder = Path(work) / "searches" / h.search.slug(query + (" fastest" if "fastest" in cmd else ""))
+        argv += ["--speed", "fastest"]
+    saved = dict(os.environ)
+    os.environ.update(state["env"], FAKE_FAIL=fail)
+    try:
+        r = h.yta(*argv)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    if r.code:
+        raise AssertionError(f"yta channel failed:\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
+    folder = Path(work) / "searches" / h.search.slug(query + (" fastest" if "fastest" in argv else ""))
     calls = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
     return r.stdout, folder, calls
 

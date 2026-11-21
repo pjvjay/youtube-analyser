@@ -1,20 +1,26 @@
-# Standing detector (and other actions)
+# The actions: how each is found (`yta detect`)
 
-Finds the sections of each video where someone is standing during the interview, and writes
-them as time ranges with a thumbnail and a YouTube link for each. Anyone in the frame counts,
-including bystanders in the background, not only the host and guest. Standing in the intro
-(teaser, title sequence, sponsor ad) is listed separately.
+`yta detect` finds the sections of each video where someone is standing during the interview,
+and writes them as time ranges with a thumbnail and a YouTube link for each. Anyone in the frame
+counts, including bystanders in the background, not only the host and guest. Standing in the
+intro (teaser, title sequence, sponsor ad) is listed separately.
 
 The same pipeline also finds **sitting, walking, running, jumping, smiling, talking and silent**,
 chosen with `--action` (see [Other actions](#other-actions---action) below). Talking and silent use
 the sound as well as the faces, and also list who spoke when. Standing stays the default, and
-its results are unchanged. `search.py` finds a described person doing any of these (see
-[Finding a person](#finding-a-person-searchpy)).
+its results are exactly those of the original standing detector (tested file by file). `yta
+search` finds a described person doing any of these ([search.md](search.md)), and `yta channel`
+a whole YouTube channel ([channel.md](channel.md)).
+
+In the code (`src/youtube_analyser/`): `pose.py` has the standing and sitting rules, `motion.py`
+walking, running and jumping, `faces.py` and `audio.py` smiling, talking and silent, `actions.py`
+puts them together per action, `analysis.py` computes and saves the model output each needs,
+and `detector.py` joins frames into sections and writes the files below.
 
 ## How it works
 
 1. ffmpeg samples frames from the video (1 per second by default).
-2. A YOLO pose model (`models/yolo11s-pose.onnx`) finds each person and 17 body points
+2. A YOLO pose model (`src/youtube_analyser/assets/models/yolo11s-pose.onnx`) finds each person and 17 body points
    (shoulders, hips, knees, ankles and so on). It runs on the CPU through OpenVINO when that
    is installed, otherwise through onnxruntime. Both give the same detections; OpenVINO is
    about 1.4–1.8× faster on Intel CPUs.
@@ -35,14 +41,14 @@ its results are unchanged. `search.py` finds a described person doing any of the
    figure's pixels are compared between samples up to 3 s apart, and a figure that never changes
    by more than 3.5 grey levels is not a person. On all 248 videos this dropped 23 sections, all
    of them still figures, while real people standing still changed by 4.4 or more.
-7. Sections in the intro are listed separately (`intro.py`, below). A section that starts in the
+7. Sections in the intro are listed separately (`yta intro`, below). A section that starts in the
    intro and ends within 3 s of the interview start counts as intro, since the start can fall
    in a crossfade; one that runs on longer is split there.
 
 ## Other actions (`--action`)
 
 ```bash
-.venv/bin/python standing/detect_standing.py *.mp4 *.mkv *.webm --out standing/output --action talking
+yta detect *.mp4 *.mkv *.webm --out output --action talking
 ```
 
 `--action` is `standing` (default), `sitting`, `walking`, `running`, `jumping`, `smiling`,
@@ -62,7 +68,7 @@ separately, and the output files are the same. What differs is how a person is j
 | talking | The sound says someone speaks and this mouth is the one moving, with this face's own voice; without clear sound, the mouth alone | the face pass (shared with smiling), the camera pass and one pass over the sound | ≥ 6 px between the eyes |
 | silent | A face that is not talking: listening, or nobody speaking | the same | ≥ 6 px between the eyes |
 
-Results for an action other than standing go to a subfolder named after it (`standing/output/talking/segments.csv`,
+Results for an action other than standing go to a subfolder named after it (`output/talking/segments.csv`,
 `review.html`, `thumbs/` and so on). Column names carry the action's name (`talking_frames`,
 `max_people_talking`), plus the measurement that picked each section's thumbnail (`best_rise`,
 `best_happy`, `best_mouth_move`, `best_speed`, `best_conf` for sitting, `best_eyes` for silent).
@@ -70,7 +76,7 @@ Talking sections also list the voices heard (`voices`) and `judged_by` (`sound+f
 or `face`); silent sections the voices heard while the person was silent (`voices_heard`).
 What each action needs besides the poses is saved once per video and shared: `faces/`, `audio/`,
 `camera/<video>.npz` and `poses/<video>.dense.npz`, so `--reclassify` after changing a threshold
-is quick for every action. `standing/actions.py` and `standing/audio.py` have the thresholds,
+is quick for every action. `motion.py`, `faces.py` and `audio.py` (in `src/youtube_analyser/`) have the thresholds,
 with the reasons for each.
 
 ### Sitting
@@ -181,14 +187,14 @@ turned so the eyes are level, and measured on the sampled frame and the 4 frames
 (0.2 s apart, so t to t+0.8 s), all cut at the same place. A burst stops at a camera cut, and a
 burst frame only counts when the face model finds a face of the same size at about the same place.
 
-- **Smiling**: `models/face_expression.onnx` (below) gives the probability that the face is
+- **Smiling**: `src/youtube_analyser/assets/models/face_expression.onnx` (below) gives the probability that the face is
   happy; a person is smiling when the median over the burst is 0.6 or more. On faces shrunk to
   144p sizes, a smile scored 0.94–1.00 and talking, shouting and neutral faces 0.17 or less with
   12 px or more between the eyes; at 9 px the two overlapped, and at 6 px a neutral face scored
   up to 0.74. So only faces with 11 px or more between the eyes are judged, which at 144p means
   close-ups. Only a few faces were available for this (one smiling, from a photo, and six that
   were not), so treat 0.6 as a starting point.
-- **Talking**: `models/face_landmark.onnx` (below) gives 468 points on the face, including the
+- **Talking**: `src/youtube_analyser/assets/models/face_landmark.onnx` (below) gives 468 points on the face, including the
   inner lips. The mouth opening is the gap between the lips divided by the distance between the outer
   eye corners; a person is talking when it changes by 0.12 or more within the burst. In a 144p
   test clip of a man talking (the "carphone" test sequence, about 20 px between the eyes) it
@@ -214,9 +220,9 @@ standing.
 ### Talking and silent with the sound: who is speaking, and which voice
 
 The faces say whose mouth moves; the sound says whether anyone is speaking at all, and which
-voice. `standing/audio.py` reads each video's sound once (16 kHz mono, from ffmpeg):
+voice. `audio.py` reads each video's sound once (16 kHz mono, from ffmpeg):
 
-1. **Speech**: `models/voice_activity.onnx` (Silero VAD) gives the probability of speech every
+1. **Speech**: `src/youtube_analyser/assets/models/voice_activity.onnx` (Silero VAD) gives the probability of speech every
    32 ms. On a clean 2-speaker recording it found 98% of the speech with 1% false alarms.
 2. **Is the sound clear enough to trust?** Per minute, the typical level of speech is compared with
    the quietest 5% of the sound (pauses, breaths, room tone). Speech must stand at least 20 dB
@@ -226,7 +232,7 @@ voice. `standing/audio.py` reads each video's sound once (16 kHz mono, from ffmp
    squeaks measured 18 dB (the detector had called 36% of it speech). So a loud mall, music beds or
    street noise switch the sound off and talking goes back to the faces alone.
 3. **Voices**: every 0.4 s, the 1.6 s of sound around it is turned into a voice fingerprint by
-   `models/voice_embedding.onnx` (Resemblyzer's speaker encoder). The fingerprints are grouped
+   `src/youtube_analyser/assets/models/voice_embedding.onnx` (Resemblyzer's speaker encoder). The fingerprints are grouped
    into voices (spectral clustering; the number of voices is where the eigenvalues jump), and
    voices that are not clearly different are merged, until every pair is at most 0.89 alike and
    fingerprints are (in the median) at least 0.10 closer to their own voice than to any other. A voice also needs
@@ -277,7 +283,7 @@ clearest moment the voice was matched to a talking face. `review.html` shows the
 thumbnails, so you can see who A and B are. `--no-sound` judges from the faces alone.
 
 **Known gaps:** voices are per video, so the host is A in one episode and B in the next (to find
-one person's voice across episodes, enrol them by name and use `search.py`, below). In the speech timeline, overlapping speech gets
+one person's voice across episodes, enrol them by name and use `yta search`, below). In the speech timeline, overlapping speech gets
 one voice. A voice with less than about 6 s of speech (5 s of fingerprints) is merged into the
 nearest, so a bystander's few words are put under someone else's voice. A face's own voice needs
 two moments of it talking alone. A listener who laughs as clearly as talking counts as talking.
@@ -287,212 +293,18 @@ The sound and picture are assumed to be in sync (within about half a second).
 
 | File | What | Source, licence |
 |---|---|---|
-| `models/face_landmark.onnx` (2.4 MB) | 468 face points from a 192×192 crop, plus a face score | MediaPipe's `face_landmark.tflite` (in the `mediapipe` 0.10.14 wheel), Apache-2.0. Converted with `python -m tf2onnx.convert --tflite face_landmark.tflite --output face_landmark.onnx --opset 13` (tf2onnx 1.17, TensorFlow 2.21); the outputs match the TFLite model to within 0.0001 |
-| `models/voice_activity.onnx` (1.2 MB) | Probability of speech every 32 ms of 16 kHz sound | Silero VAD's `silero_vad_16k_sequence.onnx`, shipped in the `silero-vad` 6.2.3 wheel, MIT. Used as is; gives the same probabilities as Silero's own step-by-step model |
-| `models/voice_embedding.onnx` (5.7 MB) | A 256-number voice fingerprint of 1.6 s of speech | Resemblyzer 0.1.4's `pretrained.pt` (GE2E speaker encoder, Apache-2.0), exported with `torch.onnx.export` with the mel filterbank (librosa's, 40 bands) built in, so it takes the power spectrum (160 frames × 201) that `audio.py` computes with numpy. Fingerprints match Resemblyzer's own to a cosine of 1.00000 |
-| `models/face_expression.onnx` (0.2 MB) | 7 expressions (angry, disgust, fear, happy, sad, surprise, neutral) from a 64×64 grey face | The mini-Xception `emotion_model.hdf5` shipped in the `fer` 25.10.3 wheel (MIT), trained on the FER2013 faces. Converted with `tf2onnx.convert.from_keras(model, input_signature=(tf.TensorSpec((None, 64, 64, 1), tf.float32, name="face"),), opset=13)`; outputs match Keras to within 4e-7. FER2013 was collected from web images for a research challenge, so check that its terms suit your use |
+| `src/youtube_analyser/assets/models/face_landmark.onnx` (2.4 MB) | 468 face points from a 192×192 crop, plus a face score | MediaPipe's `face_landmark.tflite` (in the `mediapipe` 0.10.14 wheel), Apache-2.0. Converted with `python -m tf2onnx.convert --tflite face_landmark.tflite --output face_landmark.onnx --opset 13` (tf2onnx 1.17, TensorFlow 2.21); the outputs match the TFLite model to within 0.0001 |
+| `src/youtube_analyser/assets/models/voice_activity.onnx` (1.2 MB) | Probability of speech every 32 ms of 16 kHz sound | Silero VAD's `silero_vad_16k_sequence.onnx`, shipped in the `silero-vad` 6.2.3 wheel, MIT. Used as is; gives the same probabilities as Silero's own step-by-step model |
+| `src/youtube_analyser/assets/models/voice_embedding.onnx` (5.7 MB) | A 256-number voice fingerprint of 1.6 s of speech | Resemblyzer 0.1.4's `pretrained.pt` (GE2E speaker encoder, Apache-2.0), exported with `torch.onnx.export` with the mel filterbank (librosa's, 40 bands) built in, so it takes the power spectrum (160 frames × 201) that `audio.py` computes with numpy. Fingerprints match Resemblyzer's own to a cosine of 1.00000 |
+| `src/youtube_analyser/assets/models/face_expression.onnx` (0.2 MB) | 7 expressions (angry, disgust, fear, happy, sad, surprise, neutral) from a 64×64 grey face | The mini-Xception `emotion_model.hdf5` shipped in the `fer` 25.10.3 wheel (MIT), trained on the FER2013 faces. Converted with `tf2onnx.convert.from_keras(model, input_signature=(tf.TensorSpec((None, 64, 64, 1), tf.float32, name="face"),), opset=13)`; outputs match Keras to within 4e-7. FER2013 was collected from web images for a research challenge, so check that its terms suit your use |
 
-| `models/person_mask.onnx` (0.4 MB) | Which pixels are people, from a 256×144 picture (for hair and clothes colours) | MediaPipe's selfie segmentation, landscape (`selfie_segmentation_landscape.tflite` in the `mediapipe` wheel), Apache-2.0. Converted with tf2onnx (opset 14), its custom transposed-convolution layer rewritten as a standard `ConvTranspose` plus bias; the masks match MediaPipe's own |
-| `models/gender_age.onnx` (49 MB) | How likely a 64×64 face looks female, and its apparent age (0-100) | The WideResNet from yu4u/age-gender-estimation (MIT code), weights `weights.28-3.73.hdf5` as shipped in the `py-agender` 0.0.9 wheel, rebuilt in Keras and converted with tf2onnx (opset 13), weights stored as float16 (outputs within 7e-5 of float32). **Trained on the IMDB-WIKI faces, which are released for academic research only**: check that suits your use, or switch it off in `people.toml` (`[models] gender_age = false`; apparent gender then comes from voices only, and age is not judged) |
+| `src/youtube_analyser/assets/models/person_mask.onnx` (0.4 MB) | Which pixels are people, from a 256×144 picture (for hair and clothes colours) | MediaPipe's selfie segmentation, landscape (`selfie_segmentation_landscape.tflite` in the `mediapipe` wheel), Apache-2.0. Converted with tf2onnx (opset 14), its custom transposed-convolution layer rewritten as a standard `ConvTranspose` plus bias; the masks match MediaPipe's own |
+| `src/youtube_analyser/assets/models/gender_age.onnx` (49 MB) | How likely a 64×64 face looks female, and its apparent age (0-100) | The WideResNet from yu4u/age-gender-estimation (MIT code), weights `weights.28-3.73.hdf5` as shipped in the `py-agender` 0.0.9 wheel, rebuilt in Keras and converted with tf2onnx (opset 13), weights stored as float16 (outputs within 7e-5 of float32). **Trained on the IMDB-WIKI faces, which are released for academic research only**: check that suits your use, or switch it off in `people.toml` (`[models] gender_age = false`; apparent gender then comes from voices only, and age is not judged) |
 
 All run through OpenVINO or onnxruntime, like the pose model (`--runtime`), and give the same
 results on either (faces to within 2e-6, voices identically). No new Python packages are needed.
 
-## Finding a person (`search.py`)
-
-```bash
-.venv/bin/python standing/search.py "woman with purple hair talking" *.mp4 *.mkv *.webm
-.venv/bin/python standing/search.py "man in a blue jacket" *.mp4 --action walking
-.venv/bin/python standing/search.py "Jane smiling" *.mp4 --config my_people.toml
-```
-
-The query describes a person and, optionally, an action (any of the `--action`s above; without
-one, every time the person is in view). An action alone ("people jumping", "anyone talking")
-finds everyone doing it: the detector's own sections, as `detect_standing.py --action` gives
-them. The description can use:
-
-- **hair colour**: black, brown, blond, red, grey, white, purple, pink, blue, green (and words
-  like blonde, brunette, redhead, ginger, violet, silver, dark, light);
-- **clothes colours**, of the top (shirt, jacket, coat, dress, suit, ...) or the bottom
-  (trousers, jeans, skirt, ...), or just "in red" / "wearing blue" for either;
-- **apparent gender** (woman, man, lady, guy, ...) and **age** (young, old, grey-haired);
-- **voice**: "deep voice" or "high voice";
-- **a name** you have enrolled (below).
-
-Words it does not know are listed as ignored, so check the first line it prints (`looking for:
-gender female, hair purple; action: talking`). The words, colours and thresholds are all in
-`people.toml`; copy it, change what you need and pass it with `--config` (only what differs is
-needed). `--explain` prints what was seen of every person and why they matched or not.
-
-**How it works.** It reuses everything `detect_standing.py` saved in `--out` (the pose model's
-output, faces, sound, camera movement; whatever is missing is computed and saved) and adds what
-it measures itself (`appearance/<video>.npz`), so searching again, for anyone, is quick. The
-steps go cheapest first, and a video is done as soon as nobody in it can match:
-
-1. **The pose model**, as for every action.
-2. **Hair and clothes colours**, if the query names any (`people.py`). Hair: the person's pixels
-   (`models/person_mask.onnx`) around the head, minus the face (its outline from the face landmark
-   model) and minus anything the colour of their cheeks; only on faces with at least 10 px between
-   the eyes. Top and bottom: the person's pixels between shoulders and hips, and hips and knees.
-   Each colour is named by the nearest example in the palette (people.toml). If no sample of
-   anyone has the colour asked for, nobody can match: done.
-3. **People are followed through each shot**, linked from sample to sample as the walking rules
-   link them (position after the camera's own movement, size, clothes), or by their box in
-   close-ups; never across a cut, and not between two different hair colours (a cut the camera
-   measurement missed). Every characteristic is then voted over all of a person's samples (at
-   least 2, and the winner at least half of them), so one bad sample does not decide. People
-   whose colours do not match are dropped.
-4. **Their voice**, for gender, voice or a name: the talking rules (above) find which voice is
-   each face's own. The voice's pitch gives "deep" (≤ 140 Hz) or "high" (≥ 155 Hz), and it
-   decides apparent gender before the face does, because at 144p it is the more reliable of the
-   two (below).
-5. **Apparent gender and age from the face** (`models/gender_age.onnx`, the slowest model), only
-   for the people still in the running whose voice did not decide, and only on each one's 5
-   clearest faces with at least 12 px between the eyes (`faces_per_person`).
-6. **Each person is checked** against every part of the query: yes, no, or not seen well enough.
-   Everyone with all yes is a **match**; with `--possible`, people with no "no" but something unseen
-   are listed too, as **possible** (without it, the summary says how many there were).
-7. **Their action** comes from the same rules as `--action` (talking, walking, ...), per person, and
-   times they do it are joined into sections (as for the detector: gaps of up to 2 samples,
-   intros left out unless `--keep-intro`).
-
-**People by name.** Enrol someone with a stretch of video where only they talk (or a recording)
-in your people.toml:
-
-```toml
-[[people]]
-name = "Jane"
-voice_from = { video = "20240105_sampleVid01.mp4", start = 120.0, end = 150.0 }
-# or: voice_file = "jane.wav"
-describe = "woman with purple hair"      # optional: used for when she is not talking
-```
-
-A person is Jane when their own voice matches hers: a fingerprint similarity of at least 0.86
-(`same_voice_above`), and a pitch that does not rule it out. When they do not talk, `describe`
-decides instead (all of it must be seen and match). Treat a voice match as "likely", not
-certain: on meeting recordings the same speaker in two recordings scored 0.81-0.93 and different
-speakers up to 0.90. In the test clips, Jane's voice in another video scored 0.92 and the other
-voices 0.74-0.76.
-
-**Output** (`--results`, default `results/search/<query>/`): `matches.csv` (video, person, start,
-end, duration, action, match or possible, the evidence for each part of the query, YouTube link),
-`index.html` with a thumbnail of each (the person boxed) and `thumbs/`. Local only, like the other
-results.
-
-**What to expect at 144p** (from tests on faces and voices shrunk or recorded at these sizes):
-
-| Characteristic | Measured | Limits |
-|---|---|---|
-| Dyed hair (purple, green, pink, blue) | purple and green named right at 9 and 13 px between the eyes, pink and blue at 13 px | Needs a face turned to the camera; a hat or hood hides it |
-| Natural hair | approximate | Ash blond and grey come out alike, as do dark brown and black; "dark" and "light" are safer words |
-| Clothes | the blue and beige coats in the street clips named right (after adding two examples of beige in shade to the palette) | Colours shift with light and white balance: add examples to the palette from your videos (`--explain` prints what was measured) |
-| Apparent gender by face | 88-100% right on 17 test faces with 13 px or more between the eyes, 82% at 9 px | Unreliable alone: a woman in sunglasses and one with dyed purple hair came out as men. In the test clips the woman scored 0.53-0.67 and the man 0.38, so only one was decided by face. Undecided between 0.25 and 0.6 |
-| Apparent gender by voice | women 168-250 Hz, men 98-119 Hz in 12 test voices | Only for people seen talking; deep female and high male voices fall in between (not decided) |
-| Age | not measured (the test faces had no known ages) | Treat as rough; only "young" (< 30) and "old" (> 55) are searchable |
-| Names | see above | Only when they talk, or by `describe` |
-
-Gender here is the apparent gender of a face or voice, as these models estimate it, not anyone's
-identity; the words a query can use for it are in `people.toml`.
-
-Speed: see [the channel search](#searching-a-whole-channel-channelpy) below, which measured each
-step. Gender, voice and name need the talking inputs (the face and sound passes, shared with
-`--action talking`), which are the slowest part when someone might match.
-
-## Searching a whole channel (`channel.py`)
-
-One command from a channel's address to a report of every moment found, with a link to each on
-YouTube:
-
-```bash
-.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "people jumping"
-.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "woman with purple hair talking"
-.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "man in a blue coat walking" --max-videos 50
-.venv/bin/python standing/channel.py ./my_videos "someone smiling"             # videos you already have
-```
-
-The query is `search.py`'s: an action alone finds **everyone doing it** (the detector's sections);
-a description, with or without an action, finds **that person doing it**. It prints what it
-understood before it starts (`looking for: gender female, hair purple; action: talking`).
-
-**What it does**
-
-1. Lists the channel's videos with yt-dlp (its Videos tab, newest first; `--shorts` adds the
-   Shorts). A playlist or a single video's address works too.
-2. Downloads them at the lowest resolution, 144p (the format the original 248 videos were
-   downloaded in), **without the sound when the query does not need it** (talking, silent, a
-   voice, gender and names do), 3 at a time (`--downloads`) and ahead of the analysis (up to 6
-   waiting, `--ahead`), so downloading and analysing overlap. Each is named `YYYYMMDD_<id>` and
-   listed in `videos.csv` (upload date, title, duration) for the links and the report.
-3. Finds each episode's intro (title sequence, teaser) as `intro.py` does, from the title footage
-   the first 8 long videos share (`intro_bank.npz`): results there are kept, but listed apart at
-   the end of the report. `--intros keep` treats every video as a whole.
-4. Searches each video (`search.py`, cheapest first). **With a colour in the query, a quick look
-   comes first**: the pose model and the colours on the video's keyframes only (decoding only
-   keyframes takes 2 s for a 27-minute video, against 10 s for every frame), at most one every
-   4 s. A video where nobody has the colour is done there; otherwise it is searched in full.
-5. Rewrites the report after every video, so it can be opened while the run goes on.
-
-**Output**, in `channels/<channel>/searches/<query>/`: `report.html` (thumbnails with the person
-boxed, grouped by video, newest first; each links to its moment on YouTube), `report.md` (the
-same as a list of links), `matches.csv` (upload date, title, video ID, start, end, action,
-match, whether it is in the intro, the evidence, the link) and `thumbs/`. The work folder
-(`--work`, default `channels/<channel>/`) also keeps the videos, `videos.csv` and the model
-output (`output/`), so an interrupted run carries on where it stopped (videos already searched
-are skipped), and a second query on the same channel reuses the videos and everything already
-computed. `--delete-videos` deletes each video once searched (a later query that needs something
-new downloads it again). Everything in `channels/` names the videos, so it is not committed.
-
-**Speed** (`--speed`):
-
-| Setting | What it does | |
-|---|---|---|
-| `quick` (default) | The quick look first, for queries with a colour | Can miss someone who is on screen for under about 10 s |
-| `thorough` | Every second of every video | The tested settings, throughout |
-| `fastest` | `quick`, and the pose model at input size 320 instead of 640 (about 4x faster) | Passed the same end-to-end tests (movement, talking, search) as 640; finds fewer small, distant people. Its model output is kept apart (`output-320/`) |
-
-Measured on a 27-minute test video (two or three people in close-ups nearly all the time, so
-faces and voices are everywhere), on the 4-core sandbox used for development, whose speed varied
-by up to 2x from run to run:
-
-| Query | Speed | Time | Real time |
-|---|---|---|---|
-| "woman with green hair talking" (nobody has green hair) | quick | 14 s (33 s for the first video of a run, which also loads the models) | 115x |
-| | fastest | 7 s (21 s for the first) | 230x |
-| | thorough | 162 s | 10x |
-| "woman with purple hair talking" (she is there: 16 results) | quick | 320-410 s (two runs) | 4-5x |
-| | fastest | 220-270 s (two runs) | 6-7x |
-| | thorough | 412 s | 4x |
-| "people jumping" (nobody jumps; no whole bodies in view) | quick | 104 s | 16x |
-| "people talking" (53 results) | quick | 377 s | 4x |
-
-Before these changes a person search ran every step on every video, with the gender model on
-every face: about 390 s for this video (measured when the same machine ran the pose model in 91 s
-rather than the 115-125 s of these runs). So a search for someone who is in few of the videos,
-which is what a search usually is, is now about 30x faster (`quick`) to 60x (`fastest`); in the
-videos where they might be, it is 1-1.5x faster, and the face and sound passes for talking (about
-a third of the time) and the pose model are most of it. Downloading at 144p (about 30 MB an hour
-of video, less without the sound) happens alongside the analysis, and should rarely hold it up.
-
-**More machines.** One run uses every core of its machine. `--shard K/N` searches every Nth video,
-starting with the Kth, so N runs share a channel: on a machine with many cores (each with
-`--threads`), or on several machines sharing the work folder; each run's report shows every
-run's results.
-
-**Options:** `--max-videos N` (the newest N), `--since` / `--until YYYYMMDD` (upload dates),
-`--shorts`, `--action` (instead of one in the query), `--config` (your people.toml),
-`--possible`, `--explain`, `--cookies cookies.txt` or `--cookies-from-browser firefox` (if
-YouTube asks you to sign in), `--yt-dlp-arg "--sleep-requests 1"` (any yt-dlp option, e.g. to go
-slower if YouTube limits you), `--yt-dlp` (the yt-dlp command), `--runtime`, `--threads`.
-
-**yt-dlp** is not pinned with the other packages, because YouTube changes often and only a
-recent yt-dlp keeps up: install or update it with `.venv/bin/pip install -U yt-dlp` (or use one
-on your PATH). If it reports that YouTube needs a JavaScript runtime or a sign-in, follow its
-message (its wiki covers both). This tool was tested with a stand-in for yt-dlp
-(`tests/fake_yt_dlp.py`), not against YouTube itself, which the development machine could not
-reach; the download format is the one used for the original videos. Download only what you are
-allowed to.
-
-## Where the interview starts (`intro.py`)
+## Where the interview starts (`yta intro`)
 
 Episodes open with a cold-open teaser, the show's title sequence, a sponsor ad or a logo card,
 in some combination, and the interview starts after the last of these. Title sequences, ads and
@@ -502,7 +314,7 @@ logo cards are the same across a season, so:
 2. A thumbnail that matches a short moment (≤ 15 s) in 3 or more other episodes is title
    material. (Interview footage repeated in a re-run or a compilation episode is a static shot
    that matches minutes of footage, so it is not counted.) These are saved in
-   `models/intro_bank.npz` (about 1,150 thumbnails, 0.5 MB, for the test set), so a new video
+   `intro_bank.npz` (about 1,150 thumbnails, 0.5 MB, for the test set), so a new video
    can be checked alone. The bank is made from your videos, so it is built locally and not
    committed.
 3. The interview starts after the last run of title frames that begins in the first 150 s;
@@ -519,10 +331,10 @@ frames either side of each detected start. The end of the interview is not detec
 Build the bank before the first run, and again after adding episodes with a new title design:
 
 ```bash
-.venv/bin/python standing/intro.py --build-bank *.mp4 *.mkv *.webm
+yta intro --build-bank *.mp4 *.mkv *.webm
 ```
 
-The thresholds and the reasons for them are at the top of `detect_standing.py`.
+The thresholds and the reasons for them are at the top of the detector (`yta detect`).
 
 **Known gaps:** people whose feet are out of frame, or who stand behind a table, are not
 detected, because without an ankle the rules cannot tell standing from sitting facing the
@@ -531,21 +343,24 @@ reported. A guest sitting alone, square-on to the camera, can still be reported 
 
 ## Running it
 
-From the `youtube-analyser` folder:
-
 ```bash
-.venv/bin/python standing/detect_standing.py 20240105_sampleVid01.mp4 --out standing/output
+yta detect 20240105_sampleVid01.mp4 --out output
 ```
 
 Every video in the folder (yt-dlp's unmerged `.f278.webm` leftover is skipped automatically):
 
 ```bash
-.venv/bin/python standing/detect_standing.py *.mp4 *.mkv *.webm --out standing/output
+yta detect *.mp4 *.mkv *.webm --out output
 ```
 
 A video whose `segments/<video>.csv` exists is skipped, so an interrupted run picks up where it
 stopped. The pose model's output is saved in `poses/<video>.npz`, so after changing a threshold,
 `--reclassify` redoes the sections in seconds without rerunning the model. `--force` redoes everything.
+Each saved file records what made it (the pose model, its input size, the sampling rate and
+confidence, the video file's size and the versions of the steps), and is made again by itself
+when any of that changes: running with `--imgsz 320` after a run at 640 does not mix the two.
+Two videos with the same file name in different folders would share saved output, so the second
+is skipped with a warning.
 
 Options: `--action` (above), `--imgsz` (default 640; 480 is about 1.7× faster but misses small
 background people), `--fps`, `--model` (`yolo11n-pose.onnx` is about 2.5× faster and less
@@ -575,59 +390,36 @@ seconds.
 | `audio/<video>.npz` | Talking, silent: speech probability every 32 ms, sound clarity per minute, and the voice of each 0.4 s of speech |
 | `camera/<video>.npz` | Walking, sitting, talking, silent, `--motion`: the camera's pan, tilt and zoom between 1-fps samples (measured 5 times a second), and the colours of each person's clothes |
 | `speech.csv`, `voices.csv`, `speech/`, `voices/` | Talking, silent: who spoke when and each video's voices (above) |
-| `appearance/<video>.npz` | `search.py`: hair and clothes colours, apparent gender and age of every person in every sample |
+| `appearance/<video>.npz` | `yta search`: hair and clothes colours, apparent gender and age of every person in every sample |
 | `thumbs/` | The best frame of each section, 3× enlarged |
 
-`make_report.py` turns a run into the `results/` files, adding episode titles and the verdicts
+`yta report` turns a run into the `results/` files, adding episode titles and the verdicts
 from the manual review in `results/verdicts.csv`: `standing_sections.csv` (interviews only),
 `outside_interview.csv` (intros, plus sections the review marked "after the interview"),
 `interview_starts.csv` and `README.md`. These name the videos, so they stay local; see
 [`../samples/`](../samples/README.md) for their format.
 
-`make_report.py --action talking` does the same for another action, from
-`standing/output/talking/` and the review in `results/talking/verdicts.csv` (optional: without it
+`yta report --action talking` does the same for another action, from
+`output/talking/` and the review in `results/talking/verdicts.csv` (optional: without it
 every section is "not reviewed"), into `results/talking/` (`talking_sections.csv` and so on).
 
 ## Review video
 
-`review_video.py` cuts every section out of the local videos and joins them into one video to
+`yta review` cuts every section out of the local videos and joins them into one video to
 watch, with 2 seconds of context either side and a caption bar (clip number, upload date, video
 ID, standing time range, verdict, title). It also writes an index CSV saying where each clip
 starts in the review video.
 
 ```bash
-.venv/bin/python standing/review_video.py                      # confirmed + unclear -> standing/output/review.mp4
-.venv/bin/python standing/review_video.py --verdicts "false alarm" --out standing/output/false_alarms.mp4
-.venv/bin/python standing/review_video.py --verdicts all --pad 3
+yta review                      # confirmed + unclear -> output/review.mp4
+yta review --verdicts "false alarm" --out output/false_alarms.mp4
+yta review --verdicts all --pad 3
 ```
 
 It reads `results/standing_sections.csv`, so only standing during the interviews is included.
 For the current results that is 83 sections in 74 clips, 16 minutes, made in about a minute.
 
 `--action talking` (or another action) reads `results/talking/talking_sections.csv` and writes
-`standing/output/talking/review.mp4`; for these actions the default also includes sections that
+`output/talking/review.mp4`; for these actions the default also includes sections that
 are not reviewed yet, so it is the way to review them.
 
-## Setup
-
-```bash
-/usr/local/bin/python3.12 -m venv .venv
-.venv/bin/pip install -r standing/requirements.txt
-.venv/bin/pip uninstall -y openvino-telemetry
-```
-
-The last step matters: `openvino-telemetry` comes with OpenVINO and sends a usage event to
-Google Analytics every time `openvino` is imported (unless you have opted out). OpenVINO works
-normally without it.
-
-The models were exported from Ultralytics' `yolo11n-pose` and `yolo11s-pose` weights with
-`yolo export format=onnx dynamic=True simplify=True` (Ultralytics 8.4.198, PyTorch 2.2.2, the
-last PyTorch release for Intel Macs). The Ultralytics models and weights are licensed AGPL-3.0.
-
-## Tests
-
-`tests/` has 137 tests: the decision rules on made-up measurements (seconds), standing compared
-with the original code, walking, running, jumping and up to three people talking end to end
-on made clips whose truth is known, the search for people by their looks, voice and name, and
-whole-channel searches (`channel.py`) through a stand-in for yt-dlp. See [`../tests/README.md`](../tests/README.md), and
-[`../docs/running.md`](../docs/running.md) for running everything step by step.

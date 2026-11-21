@@ -3,10 +3,12 @@
 The golden file (fixtures/standing_golden.json) holds a fingerprint of what the ORIGINAL
 standing/detect_standing.py (git commit 7bf602d) made of 240 made-up pose sequences: people
 standing, sitting or cut off at the knees, at random, with the default and other section rules
-and interview starts. The test runs the current code on the same sequences and compares.
+and interview starts. The test runs the current code on the same sequences and compares. A
+second test runs the original script (from git) and `yta detect` on the same clips and compares
+every file they write.
 
-    .venv/bin/python -m unittest tests.test_standing -v
-    .venv/bin/python -m tests.test_standing --make-golden    # rebuild the file from commit 7bf602d
+    pytest tests/test_standing.py
+    python -m tests.test_standing --make-golden    # rebuild the file from commit 7bf602d
 """
 import hashlib
 import importlib.util
@@ -19,7 +21,9 @@ from pathlib import Path
 
 import numpy as np
 
-from tests.helpers import REPO, ds, mf
+from tests import helpers as h
+from tests.helpers import REPO, mf
+from youtube_analyser import actions, detector
 
 GOLDEN = mf.ROOT / "fixtures" / "standing_golden.json"
 BASELINE = "7bf602d"
@@ -91,7 +95,9 @@ def make_golden():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "detect_standing_original.py"
         path.write_text(src)
-        sys.path.insert(0, str(REPO / "standing"))
+        (Path(tmp) / "intro.py").write_text(subprocess.run(["git", "-C", str(REPO), "show", f"{BASELINE}:standing/intro.py"],
+                                                          capture_output=True, text=True, check=True).stdout)
+        sys.path.insert(0, tmp)
         spec = importlib.util.spec_from_file_location("detect_standing_original", path)
         original = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(original)
@@ -107,20 +113,22 @@ class StandingUnchanged(unittest.TestCase):
         self.assertEqual(len(golden), 240)
         for seed, rules, poses, start in cases():
             key = f"{seed}/{rules[0]}/{rules[1]}"
-            self.assertEqual(list(fingerprint(ds.find_sections, poses, start, rules)), golden[key], key)
+            self.assertEqual(list(fingerprint(detector.find_sections, poses, start, rules)), golden[key], key)
 
     def test_the_golden_file_has_sections_to_compare(self):
         golden = json.loads(GOLDEN.read_text())["cases"]
         self.assertGreater(sum(n for _, n in golden.values()), 1000)
 
     def test_the_csv_columns_are_as_before(self):
-        self.assertEqual(ds.FRAME_FIELDS, ["t", "people", "standing", "sitting", "unknown", "best_drop", "best_knee"])
-        self.assertEqual(ds.SEGMENT_FIELDS, ["video", "start_s", "end_s", "start", "end", "duration_s", "standing_frames",
+        self.assertEqual(actions.FRAME_FIELDS, ["t", "people", "standing", "sitting", "unknown", "best_drop", "best_knee"])
+        self.assertEqual(actions.SEGMENT_FIELDS, ["video", "start_s", "end_s", "start", "end", "duration_s", "standing_frames",
                                              "max_people_standing", "best_drop", "still_diff", "youtube", "thumb"])
 
     def test_the_command_line_output_is_byte_for_byte_as_before(self):
-        """The original detect_standing.py (from git) and the current one, on the same clips into
-        fresh folders: every file they write must be the same, and nothing more."""
+        """The original detect_standing.py (from git) and `yta detect`, on the same clips into fresh
+        folders: every file they write must be the same, and nothing more. The one difference is
+        allowed: the saved model output (poses/*.npz) holds the same arrays plus a record of the
+        settings that made it (_key), so it is made again when they change."""
         clips = [str(mf.build(n)) for n in ("walk_stop_walk", "two_jumpers")]
         src = subprocess.run(["git", "-C", str(REPO), "show", f"{BASELINE}:standing/detect_standing.py"],
                              capture_output=True, text=True)
@@ -130,20 +138,26 @@ class StandingUnchanged(unittest.TestCase):
             tmp = Path(tmp)
             (tmp / "code").mkdir()
             (tmp / "code" / "detect_standing.py").write_text(src.stdout)
-            (tmp / "code" / "intro.py").write_text((REPO / "standing" / "intro.py").read_text())
-            (tmp / "code" / "models").symlink_to(REPO / "standing" / "models")
-            for code, out in ((tmp / "code" / "detect_standing.py", tmp / "before"),
-                              (REPO / "standing" / "detect_standing.py", tmp / "after")):
-                r = subprocess.run([sys.executable, str(code), *clips, "--out", str(out), "--keep-intro"],
-                                   capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            (tmp / "code" / "intro.py").write_text(subprocess.run(["git", "-C", str(REPO), "show", f"{BASELINE}:standing/intro.py"],
+                                                                  capture_output=True, text=True, check=True).stdout)
+            (tmp / "code" / "models").symlink_to(REPO / "src" / "youtube_analyser" / "assets" / "models")
+            r = subprocess.run([sys.executable, str(tmp / "code" / "detect_standing.py"), *clips, "--out", str(tmp / "before"),
+                                "--keep-intro"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            r = h.yta("detect", *clips, "--out", tmp / "after", "--keep-intro")
+            self.assertEqual(r.code, 0, r.stderr[-2000:])
             before = sorted(p.relative_to(tmp / "before") for p in (tmp / "before").rglob("*") if p.is_file())
             after = sorted(p.relative_to(tmp / "after") for p in (tmp / "after").rglob("*") if p.is_file())
             self.assertEqual(after, before)
-            with open(tmp / "after" / "segments.csv", newline="") as f:
-                self.assertTrue(list(ds.csv.DictReader(f)), "no sections to compare")
+            self.assertTrue(h.csv_rows(tmp / "after" / "segments.csv"), "no sections to compare")
             for rel in before:
-                self.assertEqual((tmp / "after" / rel).read_bytes(), (tmp / "before" / rel).read_bytes(), str(rel))
+                if rel.suffix == ".npz":
+                    old, new = np.load(tmp / "before" / rel), np.load(tmp / "after" / rel)
+                    self.assertEqual(set(new) - set(old), {"_key"}, str(rel))
+                    for k in old:
+                        np.testing.assert_array_equal(new[k], old[k], str(rel))
+                else:
+                    self.assertEqual((tmp / "after" / rel).read_bytes(), (tmp / "before" / rel).read_bytes(), str(rel))
 
 
 if __name__ == "__main__":

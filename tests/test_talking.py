@@ -11,16 +11,16 @@ three_talkers_no_sound: the same without a sound track.
 cutaways: close-ups of two different people cutting between them every 6 s, each talking in
 his own shots with his own voice.
 
-Each sampled second is judged by its picture time and burst (see actions.picture_time), away
+Each sampled second is judged by its picture time and burst (see media.picture_time), away
 from the changes in the script (the burst reaches 0.8 s past the sample).
 
-    .venv/bin/python -m unittest tests.test_talking -v      (first run about 3 minutes)
+    pytest tests/test_talking.py      (first run about 3 minutes)
 """
 import collections
 import unittest
 
 from tests import helpers as h
-from tests.helpers import actions, mf
+from tests.helpers import media, mf, motion
 
 SCRIPT = mf.TALK["three_talkers"]
 CLIPS = ["three_talkers", "three_talkers_noisy", "three_talkers_no_sound", "cutaways"]
@@ -36,7 +36,7 @@ def seats(name, action="talking"):
     timeline, by_frame, _, _ = h.people(name, action)
     out = []
     for t, people in zip(timeline["t"].tolist(), by_frame):
-        w = actions.picture_time(t, float(timeline["fps"]))
+        w = media.picture_time(t, float(timeline["fps"]))
         phase = [(a, b, who) for a, b, who in SCRIPT if a <= w < b]
         if not phase or not (phase[0][0] + 0.3 <= w and w + 1.1 <= phase[0][1]):
             continue
@@ -200,7 +200,7 @@ class Cutaways(unittest.TestCase):
         timeline, by_frame, _, extra = h.people("cutaways", "talking")
         voices = collections.defaultdict(collections.Counter)
         for t, people in zip(timeline["t"].tolist(), by_frame):
-            w = actions.picture_time(t, 1.0)
+            w = media.picture_time(t, 1.0)
             shot = [(a, b, who) for a, b, who in mf.CUTAWAYS if a + 0.3 <= w and w + 1.1 <= b]
             for p in people:
                 if shot and p["state"] == "talking":
@@ -212,7 +212,7 @@ class Cutaways(unittest.TestCase):
 
     def test_cuts_are_seen(self):
         timeline, by_frame, _, extra = h.people("cutaways", "talking")
-        cuts = [t for t, r in zip(timeline["t"].tolist(), extra["camera"]["response"]) if t > 0 and r < actions.CUT_RESPONSE]
+        cuts = [t for t, r in zip(timeline["t"].tolist(), extra["camera"]["response"]) if t > 0 and r < motion.CUT_RESPONSE]
         self.assertEqual(len(cuts), 5, cuts)
 
 

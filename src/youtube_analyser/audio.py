@@ -1,6 +1,6 @@
 """When someone is speaking, and which voice it is, from a video's sound.
 
-Used by the talking and silent actions (see actions.py for how it is combined with the faces):
+Used by the talking and silent actions (see faces.py for how it is combined with the faces):
 
 1. The sound is decoded by ffmpeg as 16 kHz mono.
 2. models/voice_activity.onnx (Silero VAD, MIT) gives the probability of speech every 32 ms.
@@ -25,17 +25,11 @@ Used by the talking and silent actions (see actions.py for how it is combined wi
    median pitch (women in the test recordings spoke at 168-250 Hz, men at 98-119 Hz) and its
    mean fingerprint, which finds the same voice in other videos.
 """
-import json
-import subprocess
-
 import numpy as np
 
-import actions
+from .media import SR
 
-SR = 16000
 HOP = 512                      # one speech probability per 32 ms
-VAD_MODEL = actions.HERE / "models" / "voice_activity.onnx"
-VOICE_MODEL = actions.HERE / "models" / "voice_embedding.onnx"
 
 # Speech: probability >= VAD_ON starts it, < VAD_OFF ends it (Silero's own defaults); pauses
 # shorter than MIN_GAP_S are bridged and bursts shorter than MIN_SPEECH_S dropped.
@@ -56,60 +50,6 @@ SMOOTH_WINDOWS = 5             # each window's voice is decided over 2 s, as tur
 # voice. A few windows of one voice can look like a voice of their own by chance: on 16 s of one
 # speaker, windows from two recordings of him were split into 4 voices of 4-7 windows each.
 MIN_VOICE_S = 5
-
-
-def load(path):
-    """The sound as 16 kHz mono float32, or None when the video has no sound."""
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
-                        "-of", "json", str(path)], capture_output=True, text=True)
-    if not json.loads(r.stdout or "{}").get("streams"):
-        return None
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(SR),
-                          "-f", "f32le", "-"], capture_output=True).stdout
-    wav = np.frombuffer(raw[:len(raw) // 4 * 4], np.float32)
-    return wav if len(wav) >= SR else None
-
-
-class VoiceModels:
-    """The speech detector and the voice fingerprint model, on OpenVINO or onnxruntime."""
-
-    def __init__(self, runtime="auto", threads=0):
-        runtime = runtime if runtime != "auto" else "openvino" if actions.ov else "onnxruntime"
-        self.vad = actions.OnnxModel(VAD_MODEL, None, runtime, threads)
-        self.voice = actions.OnnxModel(VOICE_MODEL, None, runtime, threads)
-
-    def speech_prob(self, wav, chunk_s=60):
-        """Probability of speech for every 32 ms of wav."""
-        n = len(wav) // HOP
-        x = np.concatenate([np.zeros(64, np.float32), wav[:n * HOP]])
-        h = c = np.zeros((1, 1, 128), np.float32)
-        out, step = [], int(chunk_s * SR / HOP)
-        for i in range(0, n, step):
-            rows = np.lib.stride_tricks.sliding_window_view(x[i * HOP:(min(n, i + step)) * HOP + 64], 576)[::HOP]
-            p, h, c = self.vad({"input": np.ascontiguousarray(rows), "h": h, "c": c})
-            out.append(np.ravel(p))
-        return np.concatenate(out) if out else np.zeros(0, np.float32)
-
-    def fingerprints(self, wav, starts):
-        """Voice fingerprints (n, 256) of the EMB_WIN_S windows starting at these sample offsets."""
-        out = []
-        for i in range(0, len(starts), 64):
-            batch = []
-            for s in starts[i:i + 64]:
-                seg = wav[s:s + int(EMB_WIN_S * SR)]
-                p = _power(wav, s)
-                batch.append(p * (10 ** (-30 / 10) / (np.mean(seg ** 2) + 1e-12)))
-            out.append(np.asarray(self.voice({"power": np.stack(batch)})[0]))
-        return np.concatenate(out) if out else np.zeros((0, 256), np.float32)
-
-
-def _power(wav, start, frames=160):
-    """|STFT|^2 of `frames` 25 ms frames every 10 ms from `start`, as librosa's melspectrogram
-    computes them for the whole clip (centred, zero-padded): the model's input."""
-    idx = start - 200 + 160 * np.arange(frames)[:, None] + np.arange(400)[None, :]
-    x = np.where((idx >= 0) & (idx < len(wav)), wav[np.clip(idx, 0, len(wav) - 1)], 0)
-    win = np.hanning(401)[:-1].astype(np.float32)
-    return (np.abs(np.fft.rfft(x * win, axis=1)) ** 2).astype(np.float32)
 
 
 def _runs(m):
@@ -294,6 +234,7 @@ def analyse(wav, models):
             "duration": np.float32(len(wav) / SR), "voice_f0": f0, "voice_centroid": centroid}
 
 
+
 PITCH_FRAME, PITCH_HOP = 640, 320     # 40 ms frames every 20 ms
 PITCH_RANGE = (60, 400)               # Hz: from a deep man's voice to a child's
 PITCH_VOICED = 0.5                    # autocorrelation peak that counts as voiced
@@ -351,6 +292,8 @@ def heard(audio, t0, t1, voices=None):
     if audio is None:
         return False, 0.0, []
     snr = audio["snr_db"]
+    if not len(snr):
+        return False, 0.0, []
     w = min(int(t0 // SNR_WIN_S), len(snr) - 1)  # the last window may take in a short remainder
     ok = w < len(snr) and not np.isnan(snr[w]) and snr[w] >= SNR_OK_DB
     a, b = int(t0 * SR / HOP), max(int(t0 * SR / HOP) + 1, int(t1 * SR / HOP))
@@ -384,3 +327,4 @@ def turns(audio, voices=None, join_s=0.5):
             out.append([s, e, int(v[i])])
         i = j
     return [(round(s, 2), round(e, 2), k) for s, e, k in out if e - s >= MIN_SPEECH_S]
+

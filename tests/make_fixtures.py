@@ -10,8 +10,8 @@ The moving person is a still cut-out that slides: legs do not swing. Walking and
 told apart by speed (which is what the detector uses), jumping by the body rising and landing.
 
 Usage (from the youtube-analyser folder; the tests call it themselves):
-    .venv/bin/python tests/make_fixtures.py            # build any missing clips
-    .venv/bin/python tests/make_fixtures.py --force    # rebuild all of them
+    python -m tests.make_fixtures            # build any missing clips
+    python -m tests.make_fixtures --force    # rebuild all of them
 Clips go to tests/.cache/clips/ (not committed).
 """
 import argparse
@@ -389,17 +389,18 @@ TILE = 128
 def _woman():
     """The astronaut portrait with her hair mask and mouth (found with the project's own models),
     and functions to dye her hair and open her mouth."""
-    sys.path.insert(0, str(ROOT.parent / "standing"))
-    import actions as A
-    import detect_standing as ds
-    import people as P
+    from youtube_analyser import assets, inference
+    from youtube_analyser import faces as F
+    from youtube_analyser import people as P
     img = cv2.imread(str(SOURCES / "astronaut.jpg"))
-    pose = ds.PoseModel(ds.DEFAULT_MODEL, 640, runtime="onnxruntime")
-    looks = P.AppearanceModels("onnxruntime", gender_age=False)
+    pose = inference.PoseModel(assets.model_path(inference.POSE_MODEL), 640, runtime="onnxruntime")
+    face_models = inference.FaceModels("onnxruntime")
+    looks = inference.AppearanceModels(face_models, "onnxruntime", gender_age=False)
     conf, boxes, kps = pose(img, 0.35)
     kp, box = kps[int(np.argmax(conf))], boxes[int(np.argmax(conf))]
-    geo = A.face_geometry(kp)
-    oval, _ = looks.face_outline(img, geo)
+    geo = F.face_geometry(kp)
+    lm, _ = face_models.landmarks(img, geo)   # the face's points in the picture
+    oval = lm[P.FACE_OVAL]
     h, w = img.shape[:2]
     face = np.zeros((h, w), np.uint8)
     cv2.fillPoly(face, [np.round(oval).astype(np.int32)], 1)
@@ -412,14 +413,6 @@ def _woman():
     hairish = (lab[:, :, 2] - 128 > 8) & (lab[:, :, 0] > 40) & (lab[:, :, 0] < 200)   # her warm light-brown hair
     hair = zone & ~face & looks.person_mask(img) & hairish
     hair = cv2.morphologyEx(hair.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
-    # the mouth, from the face landmarks back in the picture
-    mid, d, ang = geo
-    centre = A._below(mid, d, ang, 0.6)
-    m = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, 192 / (4 * d))
-    m[:, 2] += np.array([96, 96]) - centre
-    lm, _, _ = looks.faces.face(img, geo)
-    back = cv2.invertAffineTransform(m)
-    lm = lm @ back[:, :2].T + back[:, 2]
     top, lip, chin = lm[13][1], lm[14][1], lm[152][1]                         # inner lips, chin
     mx, half = (lm[61][0] + lm[291][0]) / 2, abs(lm[291][0] - lm[61][0]) / 2
 

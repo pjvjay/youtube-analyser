@@ -6,54 +6,29 @@
 *.ytdl
 cookies.txt
 
-# Python
+# Python, packaging, tests
 .venv/
 __pycache__/
 *.pyc
-
-# Detector output that is bulky or contains video frames (results CSVs are kept)
-standing/*/poses/
-standing/*/faces/
-standing/*/audio/
-standing/*/camera/
-standing/*/appearance/
-standing/*/frames/
-standing/*/thumbs/
-standing/*/review.html
-standing/*/review*.csv
-standing/trial*/
-
-# Models not used by default (re-exportable, see standing/README.md)
-standing/models/yolo26*.onnx
-
-.DS_Store
-
-# Per-video copies of the combined CSVs; they only mark progress for resuming a run
-# (other actions keep theirs one level down, in <out>/<action>/)
-standing/*/segments/
-standing/*/dropped/
-standing/*/intro/
-standing/*/interview/
-standing/*/*/segments/
-standing/*/*/dropped/
-standing/*/*/intro/
-standing/*/*/interview/
-standing/*/*/frames/
-standing/*/*/speech/
-standing/*/*/voices/
-standing/*/*/thumbs/
-standing/*/*/review.html
-standing/*/*/review*.csv
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+tests/.cache/
 
 # Local only: anything that names or is made from the videos (inventory, yt-dlp archive, results,
-# manual review, detector output, the title-frame bank). samples/ shows the formats with made-up names.
+# manual review, detector output, channel searches, the title-frame bank). samples/ shows the
+# formats with made-up names.
 /analysis/
 /results/
+/output/
+/output-*/
 /channels/
-/standing/output/
-/standing/models/intro_bank.npz
+/intro_bank.npz
 /archive.txt
 /long_ids.txt
 
-# Test clips and results, rebuilt by the tests (tests/make_fixtures.py)
-tests/.cache/
+.DS_Store
