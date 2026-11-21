@@ -177,16 +177,16 @@ class Searcher:
             return True
         with self.timed("quick look"):
             w, h = media.probe(video)
-            frames = [img for _, img in media.keyframes(video, w, h)]
-            poses = infer_images(frames, self.models.pose, self.settings.conf, w, h)
+            # two passes over the keyframes (reading only keyframes is quick), so they are never all in memory
+            poses = infer_images((img for _, img in media.keyframes(video, w, h)), self.models.pose, self.settings.conf, w, h)
+            n = len(poses["t"])
             if not len(poses["frame"]):
-                self.note = f"quick look: nobody in {len(frames)} keyframes"
+                self.note = f"quick look: nobody in {n} keyframes"
                 return False
-            look = people.describe(((i, img) for i, img in enumerate(frames)), poses, self.models.appearance,
-                                   self.config, looks=True)
+            look = people.describe(media.keyframes(video, w, h), poses, self.models.appearance, self.config, looks=True)
             if self.could_match(look, req):
                 return True
-            self.note = f"quick look ({len(frames)} keyframes): {self.note}"
+            self.note = f"quick look ({n} keyframes): {self.note}"
             return False
 
     def could_match(self, look, req):

@@ -159,6 +159,11 @@ class MemoryQueue(Queue):
             if self._out.pop(message.id, None) is not None:
                 self._q.put(message)
 
+    def extend(self, message, visibility_s):
+        with self._lock:
+            if message.id in self._out:
+                self._out[message.id] = (message, time.monotonic() + visibility_s)
+
     def count(self):
         return self._q.qsize()
 
@@ -189,7 +194,9 @@ class FileQueue(Queue):
             data = json.loads(taken.read_text())
             data["count"] += 1
             data["until"] = time.time() + visibility_s
-            taken.write_text(json.dumps(data))
+            tmp = taken.with_name(f".{taken.name}.tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(taken)
             return Message(p.stem, data["body"], receipt=taken, dequeue_count=data["count"])
         return None
 
@@ -210,6 +217,17 @@ class FileQueue(Queue):
             Path(message.receipt).replace(self.root / "ready" / Path(message.receipt).name)
         except FileNotFoundError:
             pass
+
+    def extend(self, message, visibility_s):
+        taken = Path(message.receipt)
+        try:
+            data = json.loads(taken.read_text())
+        except (FileNotFoundError, ValueError):
+            return
+        data["until"] = time.time() + visibility_s
+        tmp = taken.with_name(f".{taken.name}.tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(taken)
 
     def count(self):
         return len(list((self.root / "ready").glob("*.json")))

@@ -60,7 +60,8 @@ INTERVIEW_FIELDS = ["video", "interview_start_s", "interview_start", "title_end_
 # A section whose standing figures all stay below STILL_DIFF is dropped as a still figure.
 STILL_DIFF = 3.5                       # mean absolute grey-level change inside the figure's box
 STILL_PAIR_S = 3                       # compare standing samples up to this many seconds apart
-STILL_CHUNK_S = 300                    # longer sections are read in pieces of this many seconds
+STILL_CHUNK_S = 300                    # longer sections are read in pieces of this many seconds (at 144p;
+                                       # pieces of larger pictures are shorter, so they fit in memory)
 
 # Standing in the intro (title sequence, teaser, ads) is reported separately; intro.py finds
 # where the interview starts. A section that starts in the intro and ends at most this many
@@ -168,13 +169,14 @@ def still_diff(path, section, fps, w, h):
     found up to then is returned.
     """
     boxes = section["boxes"]
-    if boxes[-1][0] - boxes[0][0] <= STILL_CHUNK_S:
+    chunk = max(STILL_PAIR_S * 10, STILL_CHUNK_S * min(1.0, 256 * 144 / (w * h)))
+    if boxes[-1][0] - boxes[0][0] <= chunk:
         return _still_diff(media.read_range(path, boxes[0][0], boxes[-1][0], fps, w, h), boxes, w, h)
     best, i = None, 0
     while i < len(boxes):
         t0 = boxes[i][0]
-        part = [b for b in boxes[i:] if b[0] <= t0 + STILL_CHUNK_S + STILL_PAIR_S]
-        n = sum(b[0] < t0 + STILL_CHUNK_S for b in part)  # pairs start in this piece
+        part = [b for b in boxes[i:] if b[0] <= t0 + chunk + STILL_PAIR_S]
+        n = sum(b[0] < t0 + chunk for b in part)  # pairs start in this piece
         d = _still_diff(media.read_range(path, t0, part[-1][0], fps, w, h), part, w, h, starts=n)
         best = d if best is None else best if d is None else max(best, d)
         if best is not None and best >= STILL_DIFF:
@@ -200,7 +202,7 @@ def _still_diff(frames, boxes, w, h, starts=None):
                     x1 = int(min(w, max(a[0] + a[2], b[0] + b[2])))
                     y1 = int(min(h, max(a[1] + a[3], b[1] + b[3])))
                     if x1 - x0 >= 2 and y1 - y0 >= 2:
-                        d = float(np.abs(fa[y0:y1, x0:x1] - fb[y0:y1, x0:x1]).mean())
+                        d = float(np.abs(fa[y0:y1, x0:x1].astype(np.int16) - fb[y0:y1, x0:x1]).mean())
                         best = d if best is None else max(best, d)
     return best
 

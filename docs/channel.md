@@ -7,7 +7,7 @@ YouTube:
 yta channel "https://www.youtube.com/@SomeShow" "people jumping"
 yta channel "https://www.youtube.com/@SomeShow" "woman with purple hair talking"
 yta channel "https://www.youtube.com/@SomeShow" "man in a blue coat walking" --max-videos 50
-yta channel ./my_videos "someone smiling"             # videos you already have
+yta channel ./my_videos "someone smiling"             # videos you already have (a folder, or one file)
 ```
 
 The query is `yta search`'s: an action alone finds **everyone doing it** (the detector's sections);
@@ -32,7 +32,8 @@ understood before it starts (`looking for: gender female, hair purple; action: t
    comes first**: the pose model and the colours on the video's keyframes only (decoding only
    keyframes takes 2 s for a 27-minute video, against 10 s for every frame), at most one every
    4 s. A video where nobody has the colour is done there; otherwise it is searched in full.
-5. Rewrites the report after every video, so it can be opened while the run goes on.
+5. Rewrites the report as videos are searched (at most every 20 s, and at the end), so it can be
+   opened while the run goes on.
 
 **Output**, in `channels/<channel>/searches/<query>/`: `report.html` (thumbnails with the person
 boxed, grouped by video, newest first; each links to its moment on YouTube), `report.md` (the
@@ -103,10 +104,12 @@ One run uses every core of its machine. To go faster, spread the videos over mor
 
 ## Options
 
-`--max-videos N` (the newest N), `--since` / `--until YYYYMMDD` (upload dates: videos outside
-them are skipped before downloading when the channel's listing gives dates, else by yt-dlp before
-it downloads; a channel is listed newest first, so a run stops after 5 in a row older than
-`--since`; on a folder, the dates in the file names),
+`--max-videos N` (the newest N), `--since` / `--until` (upload dates, `YYYYMMDD` or
+`YYYY-MM-DD`: videos outside them are skipped before downloading when the channel's listing gives
+dates or an earlier download told them, else by yt-dlp before it downloads; copies already
+downloaded are checked by the date in their name; a channel is listed newest first, so a run
+stops after 5 in a row older than `--since`; on a folder, the dates in the file names; the report
+lists only videos in the dates, whatever earlier runs searched),
 `--shorts`, `--action` (instead of one in the query), `--config` (your people.toml),
 `--possible`, `--explain`, `--cookies cookies.txt` or `--cookies-from-browser firefox` (if
 YouTube asks you to sign in), `--yt-dlp-arg "--sleep-requests 1"` (any yt-dlp option, e.g. to go

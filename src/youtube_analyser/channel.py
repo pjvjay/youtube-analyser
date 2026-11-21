@@ -44,7 +44,7 @@ from .analysis import Settings
 from .cloud import FileStore
 from .query import PARTS, describe_query, parse
 from .search import Searcher, slug, thumbnail
-from .youtube import YtDlp, in_dates
+from .youtube import OUTSIDE_DATES, YtDlp, find_download, in_dates, parse_date
 
 try:
     import fcntl
@@ -63,6 +63,7 @@ KEEP = ("video", "person", "start_s", "end_s", "start", "end", "duration_s", "ac
         "youtube", "thumb", "in_intro")
 BANK_VIDEOS = 8          # the intro bank is built from the first videos of 4 minutes or more
 TOO_OLD_IN_A_ROW = 5     # a channel is listed newest first: this many too old means the rest are too
+REPORT_EVERY_S = 20      # the report is rewritten at most this often during a run (and at its end)
 
 
 @dataclass
@@ -166,23 +167,33 @@ def _plain(v):
     return v.item() if isinstance(v, np.generic) else v
 
 
-def done_results(store, prefix):
-    """{video id: result} of every video searched so far (by any run of the search)."""
-    out = {}
-    for key in store.list(f"{prefix}/done/"):
-        try:
-            out[Path(key).stem] = store.get_json(key)
-        except (ValueError, KeyError):   # being written by another run
-            pass
-    return out
+def done_results(store, prefix, known=None):
+    """{video id: result} of every video searched so far (by any run of the search). known: the
+    results read before ({key: result}, kept up to date here), so only new ones are read: a long
+    channel's report is rewritten many times."""
+    known = {} if known is None else known
+    keys = store.list(f"{prefix}/done/")
+    for key in set(known) - set(keys):
+        del known[key]
+    for key in keys:
+        if key not in known:
+            try:
+                known[key] = store.get_json(key)
+            except (ValueError, KeyError):   # being written by another run
+                pass
+    return {Path(key).stem: result for key, result in known.items()}
 
 
 # ---- the report --------------------------------------------------------------------------------
 
-def write_report(store, prefix, query, req, source, total, started, notes=()):
+def write_report(store, prefix, query, req, source, total, started, notes=(), only=None, since=None, until=None,
+                 known=None):
     """report.html, report.md and matches.csv (in the store, under prefix) from every video done
-    so far. Results in an intro are listed apart, at the end."""
-    done = done_results(store, prefix)
+    so far: only those in `only` (video ids; None: all) and uploaded between since and until (a
+    run with other dates, or a longer list, may have searched more). Results in an intro are
+    listed apart, at the end."""
+    done = {k: d for k, d in done_results(store, prefix, known).items()
+            if (only is None or k in only) and in_dates(d.get("upload_date"), since, until)}
     total = max(total, len(done))
     videos = sorted(done.values(), key=lambda d: (d["upload_date"], d["video"]), reverse=True)
     rows = [dict(r, upload_date=d["upload_date"], title=d["title"], video_id=d["video_id"]) for d in videos for r in d["rows"]]
@@ -301,7 +312,7 @@ class Inventory:
         self.path, self.rows, self.lock = Path(path), {}, threading.Lock()
         if self.path.exists():
             with open(self.path, newline="") as f:
-                self.rows = {r["video_id"]: r for r in csv.DictReader(f)}
+                self.rows = {r["video_id"]: _named(r) for r in csv.DictReader(f) if r.get("video_id")}
 
     def asked_for_sound(self, vid):
         with self.lock:
@@ -311,7 +322,8 @@ class Inventory:
         with self.lock, _file_lock(self.path.with_suffix(".lock")):
             if self.path.exists():  # other runs (--shard) may have added videos
                 with open(self.path, newline="") as f:
-                    self.rows.update({r["video_id"]: r for r in csv.DictReader(f) if r["video_id"] not in self.rows})
+                    self.rows.update({r["video_id"]: _named(r) for r in csv.DictReader(f)
+                                      if r.get("video_id") and r["video_id"] not in self.rows})
             old = self.rows.get(vid, {})
             date = info.get("upload_date") or media.upload_date(video) or entry.get("date") or ""
             duration = info.get("duration") or entry.get("duration") or media.duration(video) or None
@@ -325,11 +337,17 @@ class Inventory:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             with open(tmp, "w", newline="") as f:
-                w = csv.DictWriter(f, INVENTORY_FIELDS, lineterminator="\n")
+                extra = sorted({k for r in self.rows.values() for k in r if k and k not in INVENTORY_FIELDS})   # yours, kept
+                w = csv.DictWriter(f, INVENTORY_FIELDS + extra, lineterminator="\n")
                 w.writeheader()
                 w.writerows(sorted(self.rows.values(), key=lambda r: r["upload_date"], reverse=True))
             tmp.replace(self.path)
             return self.rows[vid]
+
+
+def _named(row):
+    """A CSV row without the values that had no column."""
+    return {k: v for k, v in row.items() if k}
 
 
 @contextlib.contextmanager
@@ -363,12 +381,14 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
     """Search a channel (or a folder of videos) on this machine. Returns (results by video id,
     the search folder)."""
     source = str(source)
+    since, until = parse_date(since), parse_date(until)
     config = cq.config()
     req = cq.request(config)
     log(f"looking for: {describe_query(req)}; action: {req['action'] or 'any (in view)'}"
         + (f"; ignored words: {', '.join(req['ignored'])}" if req["ignored"] else ""), flush=True)
     sound = needs_sound(req)
-    src_dir = Path(source) if Path(source).is_dir() else None
+    one_file = Path(source) if Path(source).is_file() else None       # a single video already downloaded
+    src_dir = Path(source) if Path(source).is_dir() else one_file.parent if one_file else None
     name = src_dir.name if src_dir else slug(re.sub(r"^https?://(www\.)?youtube\.com/", "", source))
     work = Path(work) if work else Path("channels") / name
     videos_dir = src_dir or work / "videos"
@@ -382,12 +402,19 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
     inventory = Inventory(work / "videos.csv")
     yt = yt or YtDlp()
 
-    entries = local_entries(src_dir, since, until) if src_dir else \
-        [e for e in yt.list(source, shorts) if in_dates(e.get("date"), since, until)]
+    if src_dir:
+        entries = local_entries(src_dir, since, until)
+        if one_file:
+            entries = [e for e in entries if e["path"].resolve() == one_file.resolve()]
+    else:   # a date the listing does not give may be known from an earlier download
+        entries = [e for e in yt.list(source, shorts) if in_dates(e.get("date") or _known_date(e["id"], inventory, videos_dir),
+                                                                  since, until)]
     if max_videos:
         entries = entries[:max_videos]
     log(f"{len(entries)} videos {'in ' + str(src_dir) if src_dir else 'listed'}; work folder {work}", flush=True)
-    done = {k: v for k, v in done_results(store, prefix).items() if k in {e["id"] for e in entries}}
+    wanted, known = {e["id"] for e in entries}, {}
+    done = {k: v for k, v in done_results(store, prefix, known).items()
+            if k in wanted and in_dates(v.get("upload_date"), since, until)}
     todo = [e for e in entries if e["id"] not in done]
     if shard:
         k, n = (int(x) for x in shard.split("/"))
@@ -404,7 +431,7 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
                         label_intros=cq.intros == "label", videos=existing, log=log)
     bank_path = work / ("intro_bank.npz" if not shard else f"intro_bank-{shard.replace('/', 'of')}.npz")
     started, notes = time.time(), []
-    write_report(store, prefix, cq.query, req, source, len(entries), started, notes)
+    write_report(store, prefix, cq.query, req, source, len(entries), started, notes, wanted, since, until, known)
 
     # downloads run ahead of the search, in threads; the search runs here, one video at a time
     ready, room, stop = queue.Queue(), threading.Semaphore(max(1, ahead)), threading.Event()
@@ -453,6 +480,7 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
                 log(f"{path2.name}: {result['note']}", file=sys.stderr, flush=True)
             else:
                 done[e2["id"]] = result
+                known[f"{prefix}/done/{e2['id']}.json"] = result
                 if delete_videos and not src_dir:
                     path2.unlink(missing_ok=True)
             if holds_room:
@@ -464,7 +492,9 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
                 + (f"; downloaded in {took2:.0f}s" if not src_dir else "") + f", searched in {_took(result['seconds'])}"
                 + (_eta(counts["searched_s"], counts["analysed"], time.time() - started,
                         [x for x in todo if x["id"] not in processed]) if counts["analysed"] > 1 else ""), flush=True)
-            write_report(store, prefix, cq.query, req, source, len(entries), started, notes)
+            if time.time() - counts.get("reported", 0) >= REPORT_EVERY_S:   # rewriting a long report takes a while
+                write_report(store, prefix, cq.query, req, source, len(entries), started, notes, wanted, since, until, known)
+                counts["reported"] = time.time()
 
     too_old = 0
     try:
@@ -473,7 +503,7 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
             if path is None:
                 room.release()
                 log(f"[{i + 1}/{len(todo)}] {e['id']}: {note}", flush=True)
-                if note == "outside the dates asked for":
+                if note == OUTSIDE_DATES:
                     too_old += 1
                     if too_old >= TOO_OLD_IN_A_ROW and since and not src_dir:
                         log(f"{TOO_OLD_IN_A_ROW} videos in a row older than --since: the rest are older still; stopping",
@@ -503,7 +533,7 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
         for _ in range(len(todo)):
             room.release()
         pool.shutdown(wait=False, cancel_futures=True)
-    done = write_report(store, prefix, cq.query, req, source, len(entries), started, notes)
+    done = write_report(store, prefix, cq.query, req, source, len(entries), started, notes, wanted, since, until, known)
     total = sum(len(d["rows"]) for d in done.values())
     log(f"{total} results in {sum(bool(d['rows']) for d in done.values())} videos -> {found_dir / 'report.html'}, "
         f"{found_dir / 'report.md'}, {found_dir / 'matches.csv'}", flush=True)
@@ -513,6 +543,15 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
     if searcher.unsure:
         log(f"{searcher.unsure} more people might match (not seen well enough to tell); --possible lists them", flush=True)
     return done, found_dir
+
+
+def _known_date(vid, inventory, videos_dir):
+    """A video's upload date (YYYYMMDD) from an earlier download: the inventory, or the file's name."""
+    date = inventory.rows.get(vid, {}).get("upload_date", "").replace("-", "")
+    if date:
+        return date
+    have = find_download(videos_dir, vid) if Path(videos_dir).exists() else None
+    return media.upload_date(have) if have is not None else None
 
 
 def _usable(bank):
@@ -529,6 +568,7 @@ def enqueue_channel(source, cq, store, task_queue, yt=None, max_videos=None, sin
     fingerprinted and, when intros are labelled, the intro bank built here from the first long
     videos; then one queue message per video. Returns the search id; collect_channel writes the
     report (again whenever called)."""
+    since, until = parse_date(since), parse_date(until)
     config = cq.config()
     req = cq.request(config)
     yt = yt or YtDlp()
@@ -538,6 +578,7 @@ def enqueue_channel(source, cq, store, task_queue, yt=None, max_videos=None, sin
     search_id = f"{cq.name()}-{cq.key()}"
     prefix = f"searches/{search_id}"
     spec = {"query": asdict(cq), "source": source, "since": since, "until": until, "total": len(entries),
+            "videos": [e["id"] for e in entries],
             "sound": needs_sound(req), "started": time.time(), "enrolled": {}, "bank": None}
     if req["name"] or any(p.get("voice_file") or p.get("voice_from") for p in config.get("people", [])):
         enrolled = Searcher(config, log=log).enrol()
@@ -605,7 +646,8 @@ class ChannelTasks:
         with tempfile.TemporaryDirectory() as tmp:
             path, info, note = self.yt.download(entry, tmp, spec["sound"], spec.get("since"), spec.get("until"))
             if path is None:
-                if note == "outside the dates asked for":
+                if note == OUTSIDE_DATES:
+                    self.store.put_json(f"{prefix}/skipped/{entry['id']}.json", {"entry": entry, "note": note})
                     return {"video_id": entry["id"], "note": note}
                 raise RuntimeError(note)
             meta = {"id": entry["id"], "title": info.get("title") or entry.get("title", ""),
@@ -628,10 +670,17 @@ def collect_channel(store, search_id, folder=None, log=print):
     spec = store.get_json(f"{prefix}/spec.json")
     cq = ChannelQuery(**spec["query"])
     req = cq.request()
-    done = write_report(store, prefix, cq.query, req, spec["source"], spec["total"], None)
+    skipped = {Path(k).stem for k in store.list(f"{prefix}/skipped/")}     # outside the dates, found out on download
+    failed = store.list(f"{prefix}/failed/")
+    videos = [v for v in spec.get("videos", []) if v not in skipped] if "videos" in spec else None
+    total = spec["total"] - len(skipped)
+    notes = [f"{Path(k).stem}: {store.get_json(k).get('error', '')}" for k in failed]
+    done = write_report(store, prefix, cq.query, req, spec["source"], total, None, notes, videos,
+                        spec.get("since"), spec.get("until"))
     if folder is not None:
         from .cloud import copy_tree
         copy_tree(store, prefix, folder)
-    log(f"{len(done)} of {spec['total']} videos searched; {sum(len(d['rows']) for d in done.values())} results"
+    log(f"{len(done)} of {total} videos searched; {sum(len(d['rows']) for d in done.values())} results"
+        + (f", {len(failed)} failed" if failed else "")
         + (f" -> {Path(folder) / 'report.html'}" if folder is not None else ""), flush=True)
-    return len(done), spec["total"]
+    return len(done), total

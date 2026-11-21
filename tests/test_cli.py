@@ -200,6 +200,16 @@ class Command(unittest.TestCase):
         self.assertIn("nothing to search for", r.stderr)
         r = h.yta("config")
         self.assertIn("[words]", r.stdout)
+        # no ffmpeg: said so at once, not once per video
+        from youtube_analyser import cli
+        which = cli.shutil.which
+        cli.shutil.which = lambda name: None if name == "ffprobe" else which(name)
+        try:
+            r = h.yta("detect", mf.build("walk_stop_walk"))
+        finally:
+            cli.shutil.which = which
+        self.assertEqual(r.code, 2)
+        self.assertIn("ffprobe not found: install ffmpeg", r.stderr)
         # an optional part that is not installed: said so, with what to install
         from youtube_analyser import cloud
 

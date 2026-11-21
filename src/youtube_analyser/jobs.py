@@ -13,6 +13,7 @@ Store layout:
     jobs/<job>/sections.csv    the sections found (or matches.csv for a who= job, speech.csv for talking)
     searches/<search>/...      a channel search (see channel.py)
 """
+import contextlib
 import csv
 import io
 import sys
@@ -136,22 +137,51 @@ class Worker:
             return False
         kind = m.body.get("kind")
         try:
-            if kind == "analyse":
-                self.analyse_upload(m.body["job"])
-            elif kind == "channel-video":
-                self.channel.handle(m.body)
-            else:
-                raise ValueError(f"unknown kind of work {kind!r}")
+            with self._kept_hidden(m):
+                if kind == "analyse":
+                    self.analyse_upload(m.body["job"])
+                elif kind == "channel-video":
+                    self.channel.handle(m.body)
+                else:
+                    raise ValueError(f"unknown kind of work {kind!r}")
         except Exception as e:  # a failing channel video is tried again, then reported
             self.log(f"{kind} failed (try {m.dequeue_count}): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             if kind == "channel-video" and m.dequeue_count < MAX_TRIES:
-                self.queue.retry(m)
+                self._give_back(m, self.queue.retry)
                 return True
             if kind == "channel-video":
                 self.store.put_json(f"searches/{m.body['search']}/failed/{m.body['entry']['id']}.json",
                                     {"entry": m.body["entry"], "error": f"{type(e).__name__}: {e}"})
-        self.queue.done(m)
+        self._give_back(m, self.queue.done)
         return True
+
+    @contextlib.contextmanager
+    def _kept_hidden(self, m):
+        """While the work goes on, keep the message hidden from other workers (a long video can
+        take longer than the visibility the message was taken with)."""
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(self.visibility_s / 3):
+                try:
+                    self.queue.extend(m, self.visibility_s)
+                except Exception as e:  # pragma: no cover - the queue's service hiccuped; the next beat tries again
+                    self.log(f"could not keep the message hidden: {e}", file=sys.stderr, flush=True)
+        beater = threading.Thread(target=beat, daemon=True)
+        beater.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            beater.join()
+
+    def _give_back(self, m, how):
+        """done() or retry(); if the queue no longer knows the message (its visibility ran out and
+        another worker took it), say so rather than stopping the worker."""
+        try:
+            how(m)
+        except Exception as e:
+            self.log(f"the queue no longer had the message ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
 
     def run(self, until_empty=False, poll_s=2.0, stop=None):
         """Handle messages until stopped (stop: a threading.Event), or until the queue is empty."""
@@ -172,6 +202,12 @@ class Worker:
         job = self.jobs.get(job_id)
         if job is None:  # deleted before it was started
             self.store.delete(key)
+            return
+        if job["status"] in ("done", "failed"):   # handled already (a message delivered twice)
+            return
+        if not self.store.exists(key):             # a worker stopped while analysing it, after taking the video
+            self.jobs.update(job_id, status="failed", finished=time.time(), video_deleted=True,
+                             error="the video was lost when a worker stopped while analysing it: upload it again")
             return
         self.jobs.update(job_id, status="processing", started=time.time())
         try:

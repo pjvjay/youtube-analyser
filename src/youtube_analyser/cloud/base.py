@@ -99,6 +99,9 @@ class Queue(ABC):
     def retry(self, message):  # noqa: B027 - optional: by default the message comes back when its visibility runs out
         """Offer the message again at once (the default: when its visibility runs out)."""
 
+    def extend(self, message, visibility_s):  # noqa: B027 - optional: providers that cannot do it lose nothing but time
+        """Keep the message hidden for another visibility_s (a worker still busy with it)."""
+
     def count(self):
         """Messages waiting (approximate where the provider only estimates), or None if unknown."""
         return None

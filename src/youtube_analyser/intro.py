@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import media
 from .media import hms
 
 DEFAULT_BANK = Path("intro_bank.npz")    # in the folder the commands are run from
@@ -56,7 +57,11 @@ PAIR_WITHIN_S, PAIR_BY_S, PAIR_GAP_S = 60, 30, 3
 
 def thumbs(path, vf, before=(), after=()):
     """Tiny grey thumbnails from ffmpeg, as a (n, H, W) uint8 array."""
-    cmd = ["ffmpeg", "-v", "error", *before, "-i", str(path), "-an", "-vf",
+    try:
+        stream = media._map(path)
+    except ValueError:   # not a video: no thumbnails
+        return np.zeros((0, H, W), np.uint8)
+    cmd = ["ffmpeg", "-v", "error", *before, "-i", media._arg(path), *stream, "-an", "-vf",
            f"{vf},scale={W}:{H}:flags=area,format=gray", *after, "-f", "rawvideo", "-"]
     raw = subprocess.run(cmd, capture_output=True).stdout
     return np.frombuffer(raw[:len(raw) // (W * H) * W * H], np.uint8).reshape(-1, H, W)

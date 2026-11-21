@@ -24,6 +24,7 @@ them, or by their box in close-ups), so each characteristic is decided from all 
 a track: noisy single samples are outvoted.
 """
 import math
+import re
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -61,8 +62,9 @@ def load_config(path=None, text=None):
             _merge(config, tomllib.load(f))
     if text:
         _merge(config, tomllib.loads(text))
-    for kind in ("hair", "clothes"):
-        config["colours"][kind] = {name: _lab(hexes) for name, hexes in config["colours"][kind].items()}
+    for kind in ("hair", "clothes"):   # one example may be written without the list's brackets
+        config["colours"][kind] = {name: _lab([hexes] if isinstance(hexes, str) else hexes)
+                                   for name, hexes in config["colours"][kind].items()}
     return config
 
 
@@ -75,7 +77,10 @@ def _merge(base, over):
 
 
 def _lab(hexes):
-    """sRGB '#rrggbb' strings -> OpenCV 8-bit CIELAB rows."""
+    """sRGB '#rrggbb' strings -> OpenCV 8-bit CIELAB rows (ValueError for anything else)."""
+    bad = [h for h in hexes if not re.fullmatch(r"#?[0-9a-fA-F]{6}", str(h))]
+    if bad or not hexes:
+        raise ValueError(f"colours are written #rrggbb, not {bad or hexes}")
     rgb = np.array([[int(h.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)] for h in hexes], np.uint8)
     return cv2.cvtColor(rgb[None, :, ::-1], cv2.COLOR_BGR2LAB)[0].astype(np.float32)
 

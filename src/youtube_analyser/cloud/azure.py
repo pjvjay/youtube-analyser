@@ -130,5 +130,9 @@ class AzureQueue(Queue):
     def retry(self, message):
         self.client.update_message(message.id, message.receipt, visibility_timeout=0)
 
+    def extend(self, message, visibility_s):
+        updated = self.client.update_message(message.id, message.receipt, visibility_timeout=int(visibility_s))
+        message.receipt = updated.pop_receipt   # the old receipt is no longer valid
+
     def count(self):
         return self.client.get_queue_properties().approximate_message_count

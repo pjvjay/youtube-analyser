@@ -128,15 +128,18 @@ def infer(path, model, fps, conf, windows=None):
 
 
 def infer_images(images, model, conf, w, h):
-    """The pose model on a list of pictures (the quick look's keyframes), as infer() returns it."""
+    """The pose model on pictures given one at a time (the quick look's keyframes, read as they
+    are needed, so a long or large video is never held in memory), as infer() returns it."""
     frame, confs, boxes, kps = [], [], [], []
+    n = 0
     for i, (c, b, k) in enumerate(model.run(iter(images), conf)):
+        n = i + 1
         frame += [i] * len(c)
         confs.append(c)
         boxes.append(b)
         kps.append(k)
     cat = lambda xs, shape: np.concatenate(xs) if xs else np.zeros(shape, np.float32)
-    return {"t": np.arange(len(images), dtype=np.float32), "frame": np.array(frame, np.int32), "conf": cat(confs, (0,)),
+    return {"t": np.arange(n, dtype=np.float32), "frame": np.array(frame, np.int32), "conf": cat(confs, (0,)),
             "box": cat(boxes, (0, 4)), "kp": cat(kps, (0, 17, 3)), "size": np.array([w, h]), "fps": np.float32(1)}
 
 

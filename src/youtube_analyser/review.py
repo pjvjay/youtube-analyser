@@ -29,7 +29,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .media import duration, has_audio, hms
+from .media import _arg, duration, has_audio, hms, video_stream
 
 BAR_H = 44  # caption bar height in output pixels
 FPS = 25
@@ -109,17 +109,22 @@ def make_review(action="standing", sections=None, videos_dir=Path("."), verdicts
                     ascii_text(first["title"]))
             clip = work / f"clip{n:04d}.mp4"
             dur = c["end"] - c["start"]
-            cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{c['start']:.3f}", "-i", str(src), "-i", str(cap)]
+            cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{c['start']:.3f}", "-i", _arg(src), "-i", _arg(cap)]
             audio = "0:a:0"
             if not has_audio(src):
                 cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
                 audio = "2:a"
-            vf = (f"[0:v]scale={w}:{h - BAR_H}:force_original_aspect_ratio=decrease,"
+            try:
+                stream = video_stream(src)[0]
+            except ValueError as e:
+                log(f"[{n}/{len(clips)}] {c['video']}: {e}, skipped", flush=True)
+                continue
+            vf = (f"[0:{stream}]scale={w}:{h - BAR_H}:force_original_aspect_ratio=decrease,"
                   f"pad={w}:{h}:(ow-iw)/2:{BAR_H}+({h - BAR_H}-ih)/2,setsar=1,fps={FPS}[v];"
                   "[v][1:v]overlay=0:0[out]")
             cmd += ["-filter_complex", vf, "-map", "[out]", "-map", audio, "-t", f"{dur:.3f}",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "96k", str(clip)]
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "96k", _arg(clip)]
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode or not clip.exists():
                 log(f"[{n}/{len(clips)}] {c['video']}: ffmpeg failed: {r.stderr.strip()[-300:]}", flush=True)
@@ -135,8 +140,8 @@ def make_review(action="standing", sections=None, videos_dir=Path("."), verdicts
 
         listing = work / "clips.txt"
         listing.write_text("".join(f"file '{p.name}'\n" for p in made))
-        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
-                            "-c", "copy", "-movflags", "+faststart", str(out)], capture_output=True, text=True)
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", _arg(listing),
+                            "-c", "copy", "-movflags", "+faststart", _arg(out)], capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"joining the clips failed: {r.stderr.strip()[-500:]}")
     finally:

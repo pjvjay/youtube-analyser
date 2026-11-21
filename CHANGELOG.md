@@ -60,6 +60,37 @@ it (files made with the default settings are accepted).
   or newlines are read correctly from yt-dlp; a failed video is retried on the next run (and on
   workers, three times before it is reported); thumbnails of 5-fps moments use the sampling rate
   actually used (`--jump-fps`).
+- `--since` / `--until` were ignored for videos already downloaded by an earlier search (whose
+  channel listing gave no dates), and a search run again with dates still reported the videos
+  its earlier run had searched outside them. A copy already downloaded is now checked against the
+  dates (its name holds its upload date), a date known from an earlier download rules a video out
+  before anything is done with it, and reports (also `yta collect`'s) only list videos in the
+  dates and the listing asked for. Dates are checked when given (`YYYYMMDD` or `YYYY-MM-DD`).
+- File names with a colon (`Interview: part 1.mp4`) or starting with a dash could not be read
+  (ffmpeg took them for a protocol or an option); they now can.
+- A video file with cover art or a thumbnail stored as a video stream could be read from the
+  picture's size while the video was decoded (scrambled frames): the video stream is now chosen
+  explicitly, and every read uses it.
+- The quick look held all of a video's keyframes in memory (gigabytes for long high-definition
+  videos), and the still-figure check of long sections in large videos too: both now read as they
+  go, or in shorter pieces.
+- Workers kept a message hidden for a fixed hour; a video taking longer was handed to a second
+  worker, and the first then stopped on an out-of-date receipt. Workers now keep the message
+  hidden while they work, carry on if the queue has forgotten it, skip work already done, and fail
+  a job whose video was lost with a clear message.
+- A single video's address given to `yta channel` was downloaded from its media-file address;
+  live and upcoming streams in a listing are left out.
+- Long channels: the report was rebuilt from every result file after every video (slow for
+  thousands of videos); it now reads only new results and is rewritten at most every 20 s.
+- `yta channel` takes a single downloaded video file too; `yta collect` lists failed videos as
+  problems and does not count videos found to be outside the dates.
+- Settings are checked when given (a confidence of 1.5, a negative number of videos, an odd review
+  video size, `--shard 3/2`) instead of failing later; `yta intro --build-bank` says when there
+  are too few long videos to find intros.
+- An edited `videos.csv` (columns of your own, empty rows, values without a column) and a
+  `verdicts.csv` saved by a spreadsheet (byte-order mark, stray spaces, a missing column) are read
+  properly or refused with a clear message; a palette colour can be written without brackets.
+- Only real YouTube IDs (11 letters, digits, `-` or `_`) in file names make links.
 - The review video no longer mixes up the verdicts asked for with each clip's verdicts.
 - Folder stores tidy empty folders safely when two processes delete at once; Azure downloads
   create the folder they are written to.

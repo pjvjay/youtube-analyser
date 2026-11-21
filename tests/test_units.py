@@ -242,3 +242,121 @@ def test_videos_held_back_for_the_intro_bank_are_searched_when_the_last_video_fa
                                   since="20230101", downloads=1, log=h.Captured())
     assert list(done) == ["newestvid01"]                                # searched, though it was held back
     assert done["newestvid01"]["note"] in ("nobody in view", "nobody jumping")
+
+
+# ---- dates, names and odd files (found before publishing) ---------------------------------------
+
+def test_dates_hold_for_videos_downloaded_before(fake):
+    """--since and --until apply to videos already downloaded by an earlier search (whose
+    listing gave no dates), and a search run again with dates reports only those videos."""
+    yt, url = youtube.YtDlp(FAKE), "https://www.youtube.com/@Fake"
+    quiet = h.Captured()
+    channel.run_channel(url, channel.ChannelQuery("people standing", intros="keep"), fake / "w", yt, log=quiet)
+    assert sorted(p.name for p in (fake / "w" / "videos").iterdir()) == ["20200101_oldvideo001.mp4", "20240301_newestvid01.mp4"]
+    done, _ = channel.run_channel(url, channel.ChannelQuery("people jumping", intros="keep"), fake / "w", yt,
+                                  since="20230101", log=quiet)
+    assert list(done) == ["newestvid01"]                                  # the old copy is not searched
+    done, folder = channel.run_channel(url, channel.ChannelQuery("people standing", intros="keep"), fake / "w", yt,
+                                       since="2023-01-01", log=quiet)
+    assert list(done) == ["newestvid01"]                                  # nor reported from the earlier run
+    assert "1 of 1 video searched" in (folder / "report.md").read_text()
+    done, _ = channel.run_channel(url, channel.ChannelQuery("people standing", intros="keep"), fake / "w", yt,
+                                  until="20211231", log=quiet)
+    assert list(done) == ["oldvideo001"]
+    # yt-dlp's side: a copy already there, outside the dates asked for
+    entry = {"id": "oldvideo001", "url": "https://www.youtube.com/watch?v=oldvideo001"}
+    assert yt.download(entry, fake / "w" / "videos", sound=False, since="20230101") == (None, {}, youtube.OUTSIDE_DATES)
+    assert yt.download(entry, fake / "w" / "videos", sound=False, until="20211231")[2] == "already downloaded"
+
+
+def test_dates_and_addresses():
+    assert youtube.parse_date("2024-03-01") == "20240301" == youtube.parse_date("20240301")
+    assert youtube.parse_date(None) is None and youtube.parse_date("") is None
+    for bad in ("2024-13-01", "yesterday", "240301"):
+        with pytest.raises(ValueError, match="not a date"):
+            youtube.parse_date(bad)
+    assert youtube.in_dates("2024-03-01", "20240301", "20240301") and not youtube.in_dates("2024-02-29", "20240301")
+    assert youtube.entry_url({"_type": "url", "id": "a", "url": "https://www.youtube.com/shorts/a"}) == "https://www.youtube.com/shorts/a"
+    assert youtube.entry_url({"id": "a", "url": "https://rr1.googlevideo.com/videoplayback?x",      # a single video's media file
+                              "webpage_url": "https://www.youtube.com/watch?v=a"}) == "https://www.youtube.com/watch?v=a"
+    assert youtube.entry_url({"id": "abcdefghijk"}) == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert media.youtube_id("20240101_family trip") is None              # not an 11-character YouTube ID
+    for option in (["--since", "2024-13-01"], ["--shard", "3/2"], ["--max-videos", "0"]):
+        with pytest.raises(SystemExit):
+            h.yta("channel", "x", "y", *option)
+    for option in (["--conf", "1.5"], ["--imgsz", "16"], ["--fps", "0"], ["--threads", "-1"], ["--max-gap", "x"]):
+        with pytest.raises(SystemExit):
+            h.yta("detect", "a.mp4", *option)
+    with pytest.raises(SystemExit):
+        h.yta("review", "--width", "641")
+
+
+def test_awkward_file_names_and_cover_art(tmp_path):
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=256x144:d=2:r=25", str(src)], check=True)
+    for name in ("Interview: part 1.mp4", "-starts-with-a-dash.mp4", "crypto:x.mp4"):
+        (tmp_path / name).write_bytes(src.read_bytes())
+    import os
+    here = os.getcwd()
+    os.chdir(tmp_path)                          # relative names, as a user would type them
+    try:
+        for name in ("Interview: part 1.mp4", "-starts-with-a-dash.mp4", "crypto:x.mp4"):
+            assert media.probe(name) == (256, 144), name
+            assert media.duration(name) == pytest.approx(2.0, abs=0.1), name
+            assert len(list(media.read_frames(name, 1.0, 256, 144))) == 2, name
+            assert len(list(media.keyframes(name, 256, 144))) >= 1, name
+            assert media.grab_frame(name, 1.0, 1.0, 256, 144).std() > 30, name
+    finally:
+        os.chdir(here)
+    # a cover picture stored as the first video stream: the real video is read, not the picture
+    cover = tmp_path / "cover.png"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:s=640x360", "-frames:v", "1", str(cover)], check=True)
+    both = tmp_path / "with_cover.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(cover), "-i", str(src), "-map", "0", "-map", "1", "-c", "copy",
+                    str(both)], check=True)
+    assert media.video_stream(both) == (1, 256, 144)
+    frames = [img for _, img in media.read_frames(both, 1.0, 256, 144)]
+    assert len(frames) == 2 and frames[0].std() > 30                      # the test pattern, not a red picture
+    picture_only = tmp_path / "picture.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(cover), "-c", "copy", str(picture_only)], check=True)
+    assert media.video_stream(picture_only)[1:] == (640, 360)             # a picture alone is still read
+    assert len(intro.opening(tmp_path / "notes.txt")) == 0                # not a video: no thumbnails, no crash
+
+
+def test_one_video_file_as_the_source(tmp_path):
+    folder = tmp_path / "v"
+    folder.mkdir()
+    for date in ("20240101", "20240202"):
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=256x144:d=2:r=25",
+                        str(folder / f"{date}_abcdefghij{date[-1]}.mp4")], check=True)
+    done, _ = channel.run_channel(folder / "20240202_abcdefghij2.mp4", channel.ChannelQuery("people jumping", intros="keep"),
+                                  tmp_path / "w", log=h.Captured())
+    assert list(done) == ["abcdefghij2"]
+
+
+def test_an_inventory_someone_has_edited(tmp_path):
+    inv = tmp_path / "videos.csv"
+    inv.write_text("file,upload_date,video_id,title,kind,duration_min,my notes\n"
+                   "a.mp4,2024-01-01,aaaaaaaaaaa,A,long,60,keep this\n"
+                   ",,,,,,\n"                                              # an empty row
+                   "b.mp4,2024-01-02,bbbbbbbbbbb,B,long,61,x,an extra value with no column\n")
+    i = channel.Inventory(inv)
+    assert sorted(i.rows) == ["aaaaaaaaaaa", "bbbbbbbbbbb"]
+    i.add("ccccccccccc", tmp_path / "20240103_ccccccccccc.mp4", {"title": "C", "duration": 30.0}, {}, sound=True)
+    rows = h.csv_rows(inv)
+    assert [r["video_id"] for r in rows] == ["ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa"]
+    assert rows[2]["my notes"] == "keep this" and rows[0]["upload_date"] == "2024-01-03" and rows[0]["asked_for_sound"] == "yes"
+
+
+def test_a_users_colours_and_review_files(tmp_path):
+    c = people.load_config(text='[colours.hair]\nteal = "#2a7f7f"\n')     # one example without brackets
+    assert "teal" in c["colours"]["hair"]
+    with pytest.raises(ValueError, match="#rrggbb"):
+        people.load_config(text='[colours.hair]\nteal = ["green-ish"]\n')
+    from youtube_analyser import report
+    verdicts = tmp_path / "v.csv"
+    verdicts.write_text("\ufeffvideo,start_s,verdict\nx.mp4,1.0, confirmed\n")   # a spreadsheet's BOM, a stray space
+    assert report.load(verdicts, ("video", "start_s", "verdict"))[0]["video"] == "x.mp4"
+    verdicts.write_text("video,start,verdict\nx.mp4,1.0,confirmed\n")
+    with pytest.raises(ValueError, match="no start_s column"):
+        report.load(verdicts, ("video", "start_s", "verdict"))

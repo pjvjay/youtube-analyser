@@ -34,9 +34,15 @@ ACTIONS = list(_ACTIONS)
 NOTES = ["voices", "voices_heard", "judged_by"]  # extra section columns some actions have
 
 
-def load(path):
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+def load(path, needs=()):
+    """The rows of a CSV file; ValueError if it lacks a column it needs."""
+    with open(path, newline="", encoding="utf-8-sig") as f:   # a spreadsheet's byte-order mark is fine
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    missing = [c for c in needs if c not in (reader.fieldnames or [])]
+    if missing:
+        raise ValueError(f"{path} has no {', '.join(missing)} column (it needs {', '.join(needs)})")
+    return rows
 
 
 def save(path, fields, rows):
@@ -61,14 +67,19 @@ def make_report(action="standing", detector_output=OUT, results=RESULTS, invento
         notes = [n for n in NOTES if n in header]
         fields = fields[:fields.index("verdict")] + notes + fields[fields.index("verdict"):]
     if inventory.exists():
-        videos = {r["file"]: r for r in load(inventory)}
+        videos = {r["file"]: r for r in load(inventory, ("file", "upload_date", "title", "duration_min"))}
     else:
         log(f"no inventory at {inventory}: titles and dates are left empty", file=sys.stderr)
         videos = {}
     verdict_file = results / "verdicts.csv"
     if not verdict_file.exists():
         log(f"no review yet ({verdict_file}): every section is listed as not reviewed", file=sys.stderr)
-    verdicts = {(r["video"], float(r["start_s"])): r for r in (load(verdict_file) if verdict_file.exists() else [])}
+    verdicts = {}
+    for r in load(verdict_file, ("video", "start_s", "verdict")) if verdict_file.exists() else []:
+        try:
+            verdicts[(r["video"], float(r["start_s"]))] = r
+        except ValueError:
+            raise ValueError(f"{verdict_file}: start_s {r['start_s']!r} is not a number (video {r['video']})") from None
     sections, dropped = load(out / "segments.csv"), load(out / "dropped.csv")
     intro, starts = load(out / "intro.csv"), load(out / "interview_starts.csv")
     analysed = sorted(p.stem for p in (out / "segments").glob("*.csv"))
@@ -82,7 +93,7 @@ def make_report(action="standing", detector_output=OUT, results=RESULTS, invento
                         "title": meta.get("title", ""), "start": s["start"], "end": s["end"],
                         "duration_s": s["duration_s"], "start_s": s["start_s"], "end_s": s["end_s"],
                         f"people_{action}": s[f"max_people_{action}"], **{n: s[n] for n in NOTES if n in s},
-                        "verdict": v.get("verdict", "not reviewed"), "note": v.get("note", ""),
+                        "verdict": (v.get("verdict") or "not reviewed").strip(), "note": (v.get("note") or "").strip(),
                         "youtube": s["youtube"]})
         return sorted(out, key=lambda r: (r["video"], float(r["start_s"])))
 

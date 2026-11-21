@@ -25,8 +25,8 @@ on real episodes: review their first results by eye before relying on them.
 
 ## Install
 
-Python 3.11 or later, and ffmpeg with ffprobe (version 5 or later) on the PATH. The models come
-with the package.
+Python 3.11 or later (tested on 3.11 and 3.12), and ffmpeg with ffprobe (5.1 or later; tested
+with 6.1) on the PATH. The models come with the package.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate

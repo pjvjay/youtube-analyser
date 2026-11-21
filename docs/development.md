@@ -64,7 +64,7 @@ emulator (`npm install -g azurite`; `tests/conftest.py` starts it) or a real acc
 320" pytest ...` runs the end-to-end tests with other pose model settings (see
 [tests/README.md](../tests/README.md)).
 
-Coverage of the package at 2.0.0: **97%** of its lines (191 tests, `pytest --cov` from a clean
+Coverage of the package at 2.0.0: **97%** of its lines (199 tests, `pytest --cov` from a clean
 cache, with Azurite); keep it above 90%. What is not covered is mostly error handling that needs
 a broken runtime, storage or ffmpeg to reach, the code paths without OpenVINO or on Windows, and
 `yta serve`'s call into uvicorn (the app itself is tested in-process).

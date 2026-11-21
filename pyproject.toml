@@ -16,7 +16,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Topic :: Multimedia :: Video",
 ]
-# ffmpeg and ffprobe (version 5 or later) must be on the PATH.
+# ffmpeg and ffprobe (version 5.1 or later) must be on the PATH.
 dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.9",

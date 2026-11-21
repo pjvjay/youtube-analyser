@@ -8,7 +8,7 @@ The command line, the HTTP API and the cloud workers all run the same pipeline
 | Interface | Does | On one machine | On Azure |
 |---|---|---|---|
 | `Store` | files by key: `put`, `get`, `put_file`, `get_file`, `put_stream`, `exists`, `delete`, `list` | `FileStore` (a folder): `/path` or `file:///path`; `MemoryStore` (inside one process): `memory://` | `AzureBlobStore` (a blob container): `azblob://<account>/<container>` |
-| `Queue` | work to do, each message handled once: `send`, `receive` (hidden from other workers for a while), `done`, `retry`, `count` | `MemoryQueue` (inside one process): `memory://`; `FileQueue` (processes sharing a folder): `file:///path` | `AzureQueue` (a storage queue): `azqueue://<account>/<queue>` |
+| `Queue` | work to do, each message handled once: `send`, `receive` (hidden from other workers for a while), `extend` (keep it hidden longer), `done`, `retry`, `count` | `MemoryQueue` (inside one process): `memory://`; `FileQueue` (processes sharing a folder): `file:///path` | `AzureQueue` (a storage queue): `azqueue://<account>/<queue>` |
 
 Everything is chosen by URL (`cloud.open_store(url)`, `cloud.open_queue(url)`), so the same
 program runs anywhere:
@@ -27,7 +27,9 @@ yta channel --store --queue ─ messages ─▶ ┌───────┐     
   detector's sections for an action, or with `who=` the times a described person does it) and
   `"channel-video"` (one video of a channel search: download, quick look, search, thumbnails).
   The uploaded video is deleted from the store whatever happens; a channel video that fails is
-  tried again (3 times) and then listed as a problem in the report.
+  tried again (3 times) and then listed as a problem in the report. While a worker works, it
+  keeps its message hidden from the others (however long the video takes); a message delivered
+  twice is recognised, and a worker carries on if the queue no longer knows a message it finishes.
 - **`jobs.JobStore`** keeps each job's status and results in the store (`jobs/<job>/status.json`,
   `sections.csv`, `speech.csv`, `matches.csv`), so the API and the workers need not share a
   machine. Results are deleted `RESULT_TTL_S` after the job finished, or with `DELETE`.

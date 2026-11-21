@@ -108,8 +108,11 @@ def test_a_queue_hands_out_each_message_once(task_queue):
     again = task_queue.receive(visibility_s=1)
     assert again.body == b.body and again.dequeue_count == 2
     time.sleep(2.1)                                         # its taker died: it comes back
-    late = task_queue.receive(visibility_s=60)
+    late = task_queue.receive(visibility_s=1)
     assert late is not None and late.body == b.body
+    task_queue.extend(late, 60)                             # a worker still busy keeps it hidden
+    time.sleep(1.5)
+    assert task_queue.receive() is None
     task_queue.done(late)
     assert task_queue.receive() is None
 
@@ -264,3 +267,37 @@ def test_the_command_line_starts_and_collects_a_cloud_search(fake_channel, tmp_p
     assert "jumpThree01&t=3s" in (tmp_path / "report" / "report.md").read_text()
     r = h.yta("channel", "https://www.youtube.com/@Fake", "people jumping", "--store", store)
     assert r.code == 2 and "go together" in r.stderr
+
+
+def test_a_worker_copes_with_messages_delivered_twice_and_lost_videos(tmp_path):
+    store, q = cloud.FileStore(tmp_path / "s"), cloud.MemoryQueue()
+    js, job_id = upload_job(store, q, mf.build("walk_stop_walk"), "walking")
+    q.send({"kind": "analyse", "job": job_id})             # the same work twice (a visibility ran out)
+    said = h.Captured()
+    jobs.Worker(store, q, h.SETTINGS, log=said).run(until_empty=True)
+    assert js.get(job_id)["status"] == "done"              # done once; the second message found it done
+    # a worker that stopped after taking the video: the job fails with a reason, not a KeyError
+    job = js.new("x.mp4", "walking")
+    q.send({"kind": "analyse", "job": job["job_id"]})
+    jobs.Worker(store, q, h.SETTINGS, log=said).run(until_empty=True)
+    assert "upload it again" in js.get(job["job_id"])["error"]
+
+    class Forgetful(cloud.MemoryQueue):          # the queue no longer knows the message when it is done
+        def done(self, message):
+            raise RuntimeError("the message's receipt is out of date")
+    fq = Forgetful()
+    fq.send({"kind": "mystery"})
+    worker = jobs.Worker(store, fq, h.SETTINGS, log=said, visibility_s=0.3)   # heartbeats every 0.1 s
+    worker.run(until_empty=True)                            # carries on
+    assert "no longer had the message" in said.stderr
+
+
+def test_a_long_job_keeps_its_message_hidden(tmp_path, monkeypatch):
+    store, q = cloud.FileStore(tmp_path / "s"), cloud.MemoryQueue()
+    extended = []
+    monkeypatch.setattr(q, "extend", lambda m, v: extended.append(v))
+    worker = jobs.Worker(store, q, h.SETTINGS, log=h.Captured(), visibility_s=0.3)
+    monkeypatch.setattr(worker.channel, "handle", lambda body: time.sleep(0.5))
+    q.send({"kind": "channel-video", "search": "s", "entry": {"id": "x"}})
+    worker.run(until_empty=True)
+    assert len(extended) >= 3 and set(extended) == {0.3}

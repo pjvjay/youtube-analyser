@@ -26,6 +26,9 @@ CHANNEL_RE = re.compile(r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[^/?#]+|chan
 PRINTED = "after_move:%(filepath)j\t%(upload_date)j\t%(duration)j\t%(title)j"
 
 
+OUTSIDE_DATES = "outside the dates asked for"
+
+
 class YouTubeError(RuntimeError):
     pass
 
@@ -58,9 +61,35 @@ def entry_date(entry):
     return None
 
 
+def parse_date(text):
+    """A --since / --until date as YYYYMMDD (from YYYYMMDD or YYYY-MM-DD); ValueError otherwise."""
+    if text is None or text == "":
+        return None
+    digits = str(text).strip().replace("-", "")
+    try:
+        dt.datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        raise ValueError(f"{text!r} is not a date: use YYYYMMDD or YYYY-MM-DD") from None
+    return digits
+
+
+def entry_url(entry):
+    """The page to download a listed video from: a playlist entry's address, or a single video's
+    page (not its "url", which for a full video description is the address of a media file)."""
+    if entry.get("webpage_url"):
+        return entry["webpage_url"]
+    if entry.get("_type") == "url" and entry.get("url"):
+        return entry["url"]
+    return f"https://www.youtube.com/watch?v={entry['id']}"
+
+
 def in_dates(date, since=None, until=None):
-    """Whether a YYYYMMDD date is within [since, until]; an unknown date is let through."""
-    return date is None or ((not since or date >= since) and (not until or date <= until))
+    """Whether a date (YYYYMMDD, or YYYY-MM-DD) is within [since, until]; an unknown date is let
+    through."""
+    if not date:
+        return True
+    date = str(date).replace("-", "")
+    return (not since or date >= since) and (not until or date <= until)
 
 
 def find_download(folder, vid):
@@ -113,7 +142,7 @@ class YtDlp:
                     continue
                 seen.add(e["id"])
                 out.append({"id": e["id"], "title": e.get("title") or "", "duration": e.get("duration"),
-                            "date": entry_date(e), "url": e.get("url") or f"https://www.youtube.com/watch?v={e['id']}"})
+                            "date": entry_date(e), "url": entry_url(e)})
         return out
 
     def download(self, entry, folder, sound, since=None, until=None, had_sound=False):
@@ -127,7 +156,9 @@ class YtDlp:
         if have is not None and sound and not had_sound and not media.has_audio(have):
             have.unlink()
             have = None
-        if have is not None:
+        if have is not None:   # downloaded before, perhaps for a search with other dates
+            if not in_dates(media.upload_date(have), since, until):
+                return None, {}, OUTSIDE_DATES
             return have, {}, "already downloaded"
         args = ["-f", FORMAT_SOUND if sound else FORMAT_SILENT, "-o", str(folder / "%(upload_date)s_%(id)s.%(ext)s"),
                 "--no-playlist", "--no-progress", "--no-warnings", "--concurrent-fragments", "4",
@@ -150,9 +181,9 @@ class YtDlp:
                                     "duration": float(duration) if isinstance(duration, (int, float)) else None}, ""
         have = find_download(folder, entry["id"])
         if have is not None:
-            return have, {}, ""
+            return (have, {}, "") if in_dates(media.upload_date(have), since, until) else (None, {}, OUTSIDE_DATES)
         said = r.stdout + r.stderr
         if "not in range" in said:
-            return None, {}, "outside the dates asked for"
+            return None, {}, OUTSIDE_DATES
         why = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or ["no file"])[-1]
         return None, {}, f"download failed: {why[:300]}"

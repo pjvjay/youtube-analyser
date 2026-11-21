@@ -16,6 +16,8 @@
 `yta <command> --help` lists each command's options.
 """
 import argparse
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,18 +27,66 @@ from .analysis import Settings
 from .motion import JUMP_FPS
 
 
+def _at_least(low, kind=int):
+    def check(text):
+        try:
+            v = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+        if v < low:
+            raise argparse.ArgumentTypeError(f"must be {low} or more")
+        return v
+    return check
+
+
+def _positive(text):
+    v = _at_least(0, float)(text)
+    if v <= 0:
+        raise argparse.ArgumentTypeError("must be more than 0")
+    return v
+
+
+def _fraction(text):
+    v = _positive(text)
+    if v >= 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return v
+
+
+def _even(text):
+    v = _at_least(64)(text)
+    if v % 2:
+        raise argparse.ArgumentTypeError("must be even (the video encoder needs it)")
+    return v
+
+
+def _date(text):
+    from .youtube import parse_date
+    try:
+        return parse_date(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _shard(text):
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", text)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise argparse.ArgumentTypeError("use K/N with 1 <= K <= N, e.g. 2/4")
+    return f"{int(m.group(1))}/{int(m.group(2))}"
+
+
 def _model_options(ap, fps=True):
     ap.add_argument("--model", default=Settings().pose_model,
                     help="pose model: a file name in the models folder, or a path (default %(default)s)")
-    ap.add_argument("--imgsz", type=int, default=640, help="longest side fed to the pose model (default 640)")
+    ap.add_argument("--imgsz", type=_at_least(32), default=640, help="longest side fed to the pose model (default 640)")
     if fps:
-        ap.add_argument("--fps", type=float, default=1.0, help="frames sampled per second of video (default 1)")
-    ap.add_argument("--jump-fps", type=float, default=JUMP_FPS,
+        ap.add_argument("--fps", type=_positive, default=1.0, help="frames sampled per second of video (default 1)")
+    ap.add_argument("--jump-fps", type=_positive, default=JUMP_FPS,
                     help="running and jumping: frames per second sampled where a whole body is in view (default 5)")
-    ap.add_argument("--conf", type=float, default=0.35, help="minimum person confidence (default 0.35)")
+    ap.add_argument("--conf", type=_fraction, default=0.35, help="minimum person confidence (default 0.35)")
     ap.add_argument("--runtime", choices=["auto", "openvino", "onnxruntime"], default="auto",
                     help="auto = OpenVINO if installed, else onnxruntime")
-    ap.add_argument("--threads", type=int, default=0, help="inference threads (0 = automatic)")
+    ap.add_argument("--threads", type=_at_least(0), default=0, help="inference threads (0 = automatic)")
 
 
 def _settings(a):
@@ -86,9 +136,9 @@ def build_parser():
                    help="output folder; actions other than standing write to a subfolder named after the action, "
                         "and all share its model output (default ./output)")
     _model_options(p)
-    p.add_argument("--min-frames", type=int, help="frames showing the action needed for a section "
+    p.add_argument("--min-frames", type=_at_least(1), help="frames showing the action needed for a section "
                    "(default 2; 1 for jumping, 3 for running)")
-    p.add_argument("--max-gap", type=int, help="frames without it allowed inside a section "
+    p.add_argument("--max-gap", type=_at_least(0), help="frames without it allowed inside a section "
                    "(default 2; 1 for walking and silent; 4 for jumping, whose frames are 0.2 s apart)")
     p.add_argument("--motion", choices=["any", "still", "moving"],
                    help="standing and sitting: only people standing or sitting still (or moving)")
@@ -115,21 +165,22 @@ def build_parser():
     p = sub.add_parser("channel", help="a whole channel: download, search, report with links",
                        description="Search a whole YouTube channel (or a folder of videos) and report every moment "
                                    "found, with a link to it (see docs/channel.md).")
-    p.add_argument("source", help="a YouTube channel, playlist or video address, or a folder of downloaded videos")
+    p.add_argument("source", help="a YouTube channel, playlist or video address, or a folder of downloaded videos "
+                                   "(or one video file)")
     p.add_argument("query", help='what to look for, e.g. "people jumping" or "woman with purple hair talking"')
     p.add_argument("--action", choices=list(ACTIONS) + ["visible"], help="instead of an action in the query")
     p.add_argument("--work", type=Path, help="where videos, model output and reports go (default ./channels/<channel>)")
     p.add_argument("--speed", choices=["quick", "thorough", "fastest"], default="quick",
                    help="quick (default): a quick look at keyframes first when the query has a colour; "
                         "thorough: every second of every video; fastest: quick, and a smaller pose model input")
-    p.add_argument("--max-videos", type=int, help="only the newest N videos")
-    p.add_argument("--since", help="only videos uploaded on or after this date (YYYYMMDD)")
-    p.add_argument("--until", help="only videos uploaded on or before this date (YYYYMMDD)")
+    p.add_argument("--max-videos", type=_at_least(1), help="only the newest N videos")
+    p.add_argument("--since", type=_date, help="only videos uploaded on or after this date (YYYYMMDD or YYYY-MM-DD)")
+    p.add_argument("--until", type=_date, help="only videos uploaded on or before this date (YYYYMMDD or YYYY-MM-DD)")
     p.add_argument("--shorts", action="store_true", help="include the channel's Shorts")
-    p.add_argument("--downloads", type=int, default=3, help="videos downloaded at once (default 3)")
-    p.add_argument("--ahead", type=int, default=6, help="at most this many downloaded videos waiting to be searched")
+    p.add_argument("--downloads", type=_at_least(1), default=3, help="videos downloaded at once (default 3)")
+    p.add_argument("--ahead", type=_at_least(1), default=6, help="at most this many downloaded videos waiting to be searched")
     p.add_argument("--delete-videos", action="store_true", help="delete each video once it has been searched")
-    p.add_argument("--shard", help="K/N: search only every Nth video, starting with the Kth (N runs share a channel)")
+    p.add_argument("--shard", type=_shard, help="K/N: search only every Nth video, starting with the Kth (N runs share a channel)")
     p.add_argument("--intros", choices=["label", "keep"], default="label",
                    help="label (default): set results in each episode's intro apart; keep: each video is one whole")
     p.add_argument("--config", type=Path, help="your people.toml (merged over the defaults)")
@@ -140,7 +191,7 @@ def build_parser():
                                    "(e.g. azblob://account/container); see docs/cloud.md")
     p.add_argument("--queue", help="with --store: the queue the workers take work from (e.g. azqueue://account/queue)")
     p.add_argument("--runtime", choices=["auto", "openvino", "onnxruntime"], default="auto")
-    p.add_argument("--threads", type=int, default=0)
+    p.add_argument("--threads", type=_at_least(0), default=0)
 
     p = sub.add_parser("collect", help="the report of a channel search run by cloud workers")
     p.add_argument("search", help="the search id yta channel --store --queue printed")
@@ -167,14 +218,14 @@ def build_parser():
     p.add_argument("--videos-dir", type=Path, default=Path("."), help="folder holding the videos (default .)")
     p.add_argument("--verdicts", help='comma-separated verdicts, or "all" (default "confirmed,unclear", plus '
                    '"not reviewed" for actions other than standing)')
-    p.add_argument("--pad", type=float, default=2.0, help="seconds of context before and after each section")
+    p.add_argument("--pad", type=_at_least(0, float), default=2.0, help="seconds of context before and after each section")
     p.add_argument("--out", type=Path, help="default output/review.mp4 or output/<action>/review.mp4")
-    p.add_argument("--width", type=int, default=640)
-    p.add_argument("--height", type=int, default=360)
+    p.add_argument("--width", type=_even, default=640)
+    p.add_argument("--height", type=_even, default=360)
 
     p = sub.add_parser("serve", help="the HTTP API (settings from the environment, see docs/api.md)")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=_at_least(1), default=8000)
 
     p = sub.add_parser("worker", help="take work from a queue: uploads to the API, channel searches")
     p.add_argument("--store", required=True, help="where videos and results are (a folder, or e.g. azblob://account/container)")
@@ -190,8 +241,16 @@ def build_parser():
     return ap
 
 
+NEEDS_FFMPEG = {"detect", "search", "channel", "intro", "review", "serve", "worker"}
+
+
 def main(argv=None, log=print):
     a = build_parser().parse_args(argv)
+    missing = [p for p in ("ffmpeg", "ffprobe") if a.command in NEEDS_FFMPEG and shutil.which(p) is None]
+    if missing:
+        log(f"yta {a.command}: {' and '.join(missing)} not found: install ffmpeg (5.1 or later) and put it on the PATH",
+            file=sys.stderr)
+        return 2
     try:
         return _run(a, log) or 0
     except ImportError as e:   # an optional part that is not installed
@@ -272,6 +331,9 @@ def _intro(a, log):
     bank_path = a.bank or intro.DEFAULT_BANK
     if a.build_bank:
         bank, used = intro.build_bank_from(a.videos)
+        if used < intro.SHARED_BY + 1:
+            log(f"only {used} of the videos are {intro.OPENING_S // 60} minutes or more: title frames are those shared "
+                f"by {intro.SHARED_BY + 1} or more episodes, so the bank will find no intros", file=sys.stderr)
         intro.save_bank(bank_path, bank)
         log(f"{len(bank['count'])} thumbnails ({intro.title_frames(bank)} title) from {used} videos of "
             f"{intro.OPENING_S // 60} minutes or more -> {bank_path}")

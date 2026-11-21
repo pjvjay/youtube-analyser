@@ -5,7 +5,7 @@ the API, and run the tests. Every command is run from the `youtube-analyser` fol
 
 ## 1. Set up (once)
 
-You need Python 3.11 or later and ffmpeg (with ffprobe, version 5 or later) on the PATH. The
+You need Python 3.11 or later and ffmpeg (with ffprobe, version 5.1 or later) on the PATH. The
 models come with the package.
 
 ```bash
@@ -74,13 +74,14 @@ intro bank built from 8 videos: 31 title frames shared by the episodes
 ```
 
 (The estimate is rough: videos where the person might be take far longer than the rest.) Open
-`channels/<channel>/searches/<query>/report.html` at any time: it is rewritten after each video.
+`channels/<channel>/searches/<query>/report.html` at any time: it is rewritten as videos are
+searched (at most every 20 s).
 Stop with Ctrl-C whenever you like; running the same command again carries on. Useful options:
 
 | Option | What it does |
 |---|---|
 | `--max-videos 20` | Only the newest 20 videos (try a query on a few first) |
-| `--since 20240101`, `--until 20241231` | Only videos uploaded in these dates |
+| `--since 20240101`, `--until 2024-12-31` | Only videos uploaded in these dates (also those already downloaded by an earlier search) |
 | `--speed fastest` | About 2x faster again: the pose model at a smaller input (finds fewer small, distant people) |
 | `--speed thorough` | No quick look: every second of every video (for someone who may be on screen only briefly) |
 | `--delete-videos` | Delete each video once searched, to save disk |
