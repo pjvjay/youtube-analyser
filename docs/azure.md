@@ -11,9 +11,10 @@ It runs locally today and runs unchanged as an Azure Container App:
 
 | Call | Does |
 |---|---|
-| `POST /jobs?name=<file>&action=<action>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id`. `action` is `standing` (default), `sitting`, `jumping`, `smiling` or `talking` |
+| `POST /jobs?name=<file>&action=<action>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id`. `action` is `standing` (default), `sitting`, `walking`, `running`, `jumping`, `smiling`, `talking` or `silent` |
 | `GET /jobs/{job_id}` | `queued`, `processing`, `done` or `failed`, plus `interview_start_s`, `intro_sections` and `video_deleted` |
 | `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing` (for another action, `<action>_frames, max_people_<action>`), for the interview only (the intro is left out) |
+| `GET /jobs/{job_id}/speech.csv` | Talking and silent: who spoke when (voices A, B... from the sound), whether they were on screen, and whether the sound was clear enough to trust |
 | `DELETE /jobs/{job_id}` | Forgets the job and its result |
 
 The video is deleted when processing ends, whether it succeeded or failed, and leftovers are
@@ -94,10 +95,12 @@ is about twice as fast but misses small background people.
 | Price before the free grant | ~$3.00–4.30 |
 | Price if it's the only Container Apps use that month | $0 (within the free grant) |
 
-Other actions add to this. Sitting adds nothing. Smiling and talking add a face pass, about 20%
-more when a face is in view most of the time. Jumping runs the pose model again at 5 fps, but
-only around moments where a whole body is in view, which in a sit-down show is a small part of
-each episode. Each job runs the pose model itself, so asking for two actions on the same
+Other actions add to this. Sitting and walking add a pass over the picture at 5 frames a second
+for the camera's movement (about 2 minutes per hour of video, a fifth of the pose model's time). Smiling, talking and silent add a
+face pass, about 20% more when a face is in view most of the time, and talking and silent the
+camera pass and about 35 s per hour of sound for the speech and voices. Running and jumping run the
+pose model again at 5 fps, but only around moments where a whole body is in view, which in a
+sit-down show is a small part of each episode. Each job runs the pose model itself, so asking for two actions on the same
 video means two jobs and twice the cost; the command line shares the pose model's output
 between actions instead.
 

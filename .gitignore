@@ -14,6 +14,8 @@ __pycache__/
 # Detector output that is bulky or contains video frames (results CSVs are kept)
 standing/*/poses/
 standing/*/faces/
+standing/*/audio/
+standing/*/camera/
 standing/*/frames/
 standing/*/thumbs/
 standing/*/review.html
@@ -36,6 +38,8 @@ standing/*/*/dropped/
 standing/*/*/intro/
 standing/*/*/interview/
 standing/*/*/frames/
+standing/*/*/speech/
+standing/*/*/voices/
 standing/*/*/thumbs/
 standing/*/*/review.html
 standing/*/*/review*.csv
@@ -48,3 +52,6 @@ standing/*/*/review*.csv
 /standing/models/intro_bank.npz
 /archive.txt
 /long_ids.txt
+
+# Test clips and results, rebuilt by the tests (tests/make_fixtures.py)
+tests/.cache/

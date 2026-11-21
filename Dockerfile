@@ -15,11 +15,12 @@ COPY service/requirements.txt service/requirements.txt
 RUN pip install --no-cache-dir -r service/requirements.txt \
  && pip uninstall -y openvino-telemetry
 
-COPY standing/detect_standing.py standing/intro.py standing/actions.py standing/
+COPY standing/detect_standing.py standing/intro.py standing/actions.py standing/audio.py standing/
 # intro_bank.npz is built locally (standing/intro.py --build-bank) and copied when it exists;
-# the [z] wildcard keeps the build working without it. The two face models (2.7 MB) are for
-# action=smiling and action=talking.
+# the [z] wildcard keeps the build working without it. The face models (2.7 MB) are for
+# smiling, talking and silent; the voice models (7 MB) for talking and silent.
 COPY standing/models/yolo11s-pose.onnx standing/models/face_landmark.onnx standing/models/face_expression.onnx \
+     standing/models/voice_activity.onnx standing/models/voice_embedding.onnx \
      standing/models/intro_bank.np[z] standing/models/
 COPY service/app.py service/
 

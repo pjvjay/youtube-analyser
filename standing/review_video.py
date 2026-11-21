@@ -9,7 +9,7 @@ whose clips would overlap are merged into one clip. Every clip is re-encoded to 
 (640x360, 25 fps, H.264 + AAC, with silent audio where the source has none) so the clips join
 without glitches. An index CSV next to the video says where each clip starts in it.
 
-With --action (sitting, jumping, smiling, talking) it reads results/<action>/<action>_sections.csv
+With --action (sitting, walking, running, jumping, smiling, talking, silent) it reads results/<action>/<action>_sections.csv
 (from make_report.py --action) and writes standing/output/<action>/review.mp4; there the default
 also includes sections that are not reviewed yet, since this video is how you review them.
 
@@ -92,7 +92,7 @@ def plan_clips(sections, pad):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--action", choices=["standing", "sitting", "jumping", "smiling", "talking"],
+    ap.add_argument("--action", choices=["standing", "sitting", "walking", "running", "jumping", "smiling", "talking", "silent"],
                     default="standing", help="which results to use (sets the defaults below)")
     ap.add_argument("--sections", type=Path, help="default results/standing_sections.csv, or "
                     "results/<action>/<action>_sections.csv")

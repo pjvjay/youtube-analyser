@@ -1,7 +1,7 @@
 """HTTP API for the standing detector: upload a video, get the standing sections back as CSV.
 
-Other actions work the same way: add action=sitting, jumping, smiling or talking to the upload
-(default standing; see standing/detect_standing.py and standing/actions.py).
+Other actions work the same way: add action=sitting, walking, running, jumping, smiling, talking
+or silent to the upload (default standing; see standing/detect_standing.py, actions.py and audio.py).
 
 The uploaded video only exists on local disk while it waits and is processed. It is deleted
 as soon as it has been analysed, whether the job succeeded or failed, and any videos
@@ -11,11 +11,14 @@ memory until DELETE or until RESULT_TTL_S after the job finished.
     POST   /jobs?name=<file name>&action=<action>   request body = the video bytes -> 202 {"job_id", ...}
     GET    /jobs/{job_id}            status: queued | processing | done | failed
     GET    /jobs/{job_id}/sections.csv   sections from the interview start on
+    GET    /jobs/{job_id}/speech.csv     talking and silent: who spoke when (voices A, B... from the
+                                         sound) and whether they were on screen, for the whole video
     DELETE /jobs/{job_id}
     GET    /healthz
 
 The CSV columns are start_s, end_s, start, end, duration_s, <action>_frames and
-max_people_<action> (for standing: standing_frames, max_people_standing, as before).
+max_people_<action> (for standing: standing_frames, max_people_standing, as before); talking
+adds voices and judged_by, silent voices_heard and judged_by.
 
 Sections in the intro (title sequence, teaser, ads) are left out of the CSV; the status says
 where the interview starts and how many intro sections there were. Finding the start needs the
@@ -24,7 +27,7 @@ standing/intro.py --build-bank; without it each whole video is treated as the in
 
 Settings (environment): API_KEY (when set, callers must send it in the x-api-key header),
 WORK_DIR, MAX_UPLOAD_MB (default 2048), RESULT_TTL_S (default 3600), MODEL, IMGSZ (default
-640), FPS (default 1), JUMP_FPS (default 5: jumping's extra samples where a whole body is in view).
+640), FPS (default 1), JUMP_FPS (default 5: running and jumping's extra samples where a whole body is in view).
 
 Run locally from the youtube-analyser folder:
     .venv/bin/uvicorn service.app:app --port 8000
@@ -62,12 +65,14 @@ CONF = 0.35  # the command line's default; sections use each action's default ru
 
 
 def csv_fields(action):
-    return ["start_s", "end_s", "start", "end", "duration_s", f"{action}_frames", f"max_people_{action}"]
+    notes = [ds.NOTE_COLUMNS[n] for n in ds.ACTIONS[action].get("notes", ())]
+    return ["start_s", "end_s", "start", "end", "duration_s", f"{action}_frames", f"max_people_{action}", *notes]
 
 
+SPEECH_FIELDS = [f for f in ds.SPEECH_FIELDS if f not in ("video", "youtube")]
 STATUS_FIELDS = ["job_id", "name", "action", "status", "size_mb", "created", "started", "finished",
                  "frames", "interview_start_s", "sections", "intro_sections", "still_figures_dropped",
-                 "error", "video_deleted"]
+                 "voices", "sound_trusted", "error", "video_deleted"]
 
 jobs = {}  # job_id -> job dict; only touched under `lock`
 lock = threading.Lock()
@@ -90,17 +95,21 @@ def run_jobs():
                 if not len(poses["t"]):
                     raise ValueError("no video frames could be decoded")
                 start = ds.intro.interview_start(path, state["bank"])["interview_start_s"]
-                extra = ds.action_input(path, poses, action, state["model"], face_models, CONF, JUMP_FPS)
+                models = {"pose": state["model"], "faces": face_models, "voices": voice_models}
+                extra = ds.action_input(path, poses, action, models, CONF, JUMP_FPS)
                 _, sections, in_intro, still = ds.detect(path, poses, action, rules["min_frames"],
                                                          rules["max_gap"], start, extra)
-                out = io.StringIO()
-                w = csv.DictWriter(out, csv_fields(action), extrasaction="ignore")
-                w.writeheader()
-                w.writerows(sections)
+                speech, sound = None, {}
+                if action in ds.SOUND_ACTIONS:
+                    speech = to_csv(SPEECH_FIELDS, ds.speech_timeline(path, poses, action, extra)[0])
+                    a = extra["audio"]
+                    sound = {"voices": int(a["voices"]) if a is not None else 0,
+                             "sound_trusted": round(float((a["snr_db"] >= ds.audio.SNR_OK_DB).mean()), 2)
+                             if a is not None and len(a["snr_db"]) else 0.0}
                 with lock:
-                    job.update(status="done", csv=out.getvalue(), frames=len(poses["t"]),
-                               interview_start_s=start, sections=len(sections),
-                               intro_sections=len(in_intro), still_figures_dropped=len(still))
+                    job.update(status="done", csv=to_csv(csv_fields(action), sections), speech_csv=speech,
+                               frames=len(poses["t"]), interview_start_s=start, sections=len(sections),
+                               intro_sections=len(in_intro), still_figures_dropped=len(still), **sound)
         except Exception as e:  # report it on the job; the service keeps running
             with lock:
                 job.update(status="failed", error=f"{type(e).__name__}: {e}")
@@ -112,10 +121,25 @@ def run_jobs():
 
 
 def face_models():
-    """The face models, loaded by the job thread the first time smiling or talking is asked for."""
+    """The face models, loaded by the job thread the first time an action needs them."""
     if "faces" not in state:
         state["faces"] = ds.actions.FaceModels()
     return state["faces"]
+
+
+def voice_models():
+    """The speech and voice models, loaded by the job thread the first time talking or silent is asked for."""
+    if "voices" not in state:
+        state["voices"] = ds.audio.VoiceModels()
+    return state["voices"]
+
+
+def to_csv(fields, rows):
+    out = io.StringIO()
+    w = csv.DictWriter(out, fields, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(rows)
+    return out.getvalue()
 
 
 def expire_results():
@@ -183,8 +207,9 @@ async def create_job(request: Request, name: str = "video", action: str = "stand
         jobs[job_id] = {"job_id": job_id, "name": name[:200], "action": action, "status": "queued",
                         "size_mb": round(size / 1e6, 1), "created": time.time(), "started": None,
                         "finished": None, "frames": None, "interview_start_s": None, "sections": None,
-                        "intro_sections": None, "still_figures_dropped": None, "error": None,
-                        "video_deleted": False, "csv": None}
+                        "intro_sections": None, "still_figures_dropped": None, "voices": None,
+                        "sound_trusted": None, "error": None, "video_deleted": False, "csv": None,
+                        "speech_csv": None}
     work.put((job_id, path))
     return {"job_id": job_id, "status_url": f"/jobs/{job_id}", "result_url": f"/jobs/{job_id}/sections.csv"}
 
@@ -203,6 +228,17 @@ def job_result(job_id: str, x_api_key: str | None = Header(default=None)):
     if job["status"] != "done":
         raise HTTPException(409, f"job is {job['status']}" + (f": {job['error']}" if job["error"] else ""))
     return PlainTextResponse(job["csv"], media_type="text/csv")
+
+
+@app.get("/jobs/{job_id}/speech.csv")
+def job_speech(job_id: str, x_api_key: str | None = Header(default=None)):
+    check_key(x_api_key)
+    job = get_job(job_id)
+    if job["action"] not in ds.SOUND_ACTIONS:
+        raise HTTPException(404, "speech.csv is made for action=talking and action=silent")
+    if job["status"] != "done":
+        raise HTTPException(409, f"job is {job['status']}" + (f": {job['error']}" if job["error"] else ""))
+    return PlainTextResponse(job["speech_csv"], media_type="text/csv")
 
 
 @app.delete("/jobs/{job_id}", status_code=204)

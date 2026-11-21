@@ -8,9 +8,11 @@ Writes results/standing_sections.csv (standing during the interviews), outside_i
 (standing in the intros, found by the detector, and after the interview, marked in the review;
 both are left out of the main list), interview_starts.csv and README.md.
 
-With --action (sitting, jumping, smiling, talking) it reads standing/output/<action>/ and
-results/<action>/verdicts.csv (optional until you have reviewed some sections) and writes the
-same files to results/<action>/, named <action>_sections.csv and so on.
+With --action (sitting, walking, jumping, smiling, talking, silent) it reads
+standing/output/<action>/ and results/<action>/verdicts.csv (optional until you have reviewed
+some sections) and writes the same files to results/<action>/, named <action>_sections.csv and
+so on. For talking and silent it also writes speech.csv (who spoke when, from the sound) and
+voices.csv (each video's voices), with episode titles.
 
 Usage (from the youtube-analyser folder):
     .venv/bin/python standing/make_report.py
@@ -28,7 +30,8 @@ FIELDS = ["upload_date", "video", "title", "start", "end", "duration_s", "start_
           "people_standing", "verdict", "note", "youtube"]
 START_FIELDS = ["upload_date", "video", "title", "interview_start", "interview_start_s", "how"]
 AFTER = "after the interview"  # verdict for standing in material played after the interview
-ACTIONS = ["standing", "sitting", "jumping", "smiling", "talking"]  # as in detect_standing.ACTIONS
+ACTIONS = ["standing", "sitting", "walking", "running", "jumping", "smiling", "talking", "silent"]  # as in detect_standing
+NOTES = ["voices", "voices_heard", "judged_by"]  # extra section columns some actions have
 
 
 def load(path):
@@ -46,11 +49,21 @@ def save(path, fields, rows):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--action", choices=ACTIONS, default="standing")
-    action = ap.parse_args().action
-    out = OUT if action == "standing" else OUT / action
-    results = RESULTS if action == "standing" else RESULTS / action
+    ap.add_argument("--detector-output", type=Path, default=OUT, help="detect_standing.py's --out (default standing/output)")
+    ap.add_argument("--results", type=Path, default=RESULTS, help="where to write (default results/)")
+    ap.add_argument("--inventory", type=Path, default=ROOT / "analysis" / "videos.csv",
+                    help="the video list with titles (default analysis/videos.csv)")
+    args = ap.parse_args()
+    action = args.action
+    out = args.detector_output if action == "standing" else args.detector_output / action
+    results = args.results if action == "standing" else args.results / action
     fields = [f if f != "people_standing" else f"people_{action}" for f in FIELDS]
-    videos = {r["file"]: r for r in load(ROOT / "analysis" / "videos.csv")}
+    if action != "standing":
+        with open(out / "segments.csv", newline="") as f:
+            header = csv.DictReader(f).fieldnames or []
+        notes = [n for n in NOTES if n in header]
+        fields = fields[:fields.index("verdict")] + notes + fields[fields.index("verdict"):]
+    videos = {r["file"]: r for r in load(args.inventory)}
     verdict_file = results / "verdicts.csv"
     verdicts = {(r["video"], float(r["start_s"])): r
                 for r in (load(verdict_file) if action == "standing" or verdict_file.exists() else [])}
@@ -66,7 +79,7 @@ def main():
             out.append({"upload_date": meta.get("upload_date", ""), "video": s["video"],
                         "title": meta.get("title", ""), "start": s["start"], "end": s["end"],
                         "duration_s": s["duration_s"], "start_s": s["start_s"], "end_s": s["end_s"],
-                        f"people_{action}": s[f"max_people_{action}"],
+                        f"people_{action}": s[f"max_people_{action}"], **{n: s[n] for n in NOTES if n in s},
                         "verdict": v.get("verdict", "not reviewed"), "note": v.get("note", ""),
                         "youtube": s["youtube"]})
         return sorted(out, key=lambda r: (r["video"], float(r["start_s"])))
@@ -89,8 +102,18 @@ def main():
     hours = sum(float(by_stem[stem]["duration_min"]) for stem in analysed if stem in by_stem) / 60
     count = Counter(r["verdict"] for r in rows)
     if action != "standing":
+        voices = []
+        if (out / "speech.csv").exists():
+            def titled(r):
+                meta = videos.get(r["video"], {})
+                return {"upload_date": meta.get("upload_date", ""), "title": meta.get("title", ""), **r}
+            speech = [titled(r) for r in load(out / "speech.csv")]
+            voices = [titled(r) for r in load(out / "voices.csv")]
+            for name, found in (("speech.csv", speech), ("voices.csv", voices)):
+                save(results / name, ["upload_date", "title"] + [k for k in (found[0] if found else {}) if
+                                                                 k not in ("upload_date", "title")], found)
         (results / "README.md").write_text(action_readme(action, rows, intro_rows, after_rows, dropped, start_rows,
-                                                         len(analysed), hours, count))
+                                                         len(analysed), hours, count, voices))
         print(f"{len(rows)} sections ({dict(count)}) -> {results / f'{action}_sections.csv'}, {results / 'README.md'}")
         return
     good = [r for r in rows if r["verdict"] in ("confirmed", "unclear")]
@@ -193,8 +216,8 @@ def main():
            f"{len(dropped)} sections were dropped automatically because the figure's pixels never "
            "changed (statues, posters, artwork). They are listed in "
            "`standing/output/dropped.csv`; all were checked and none was a real person.", ""]
-    (RESULTS / "README.md").write_text("\n".join(md))
-    print(f"{len(rows)} sections ({dict(count)}) -> {RESULTS / 'standing_sections.csv'}, {RESULTS / 'README.md'}")
+    (results / "README.md").write_text("\n".join(md))
+    print(f"{len(rows)} sections ({dict(count)}) -> {results / 'standing_sections.csv'}, {results / 'README.md'}")
 
 
 WHAT = {  # how each action is found, and what it misses; see standing/README.md for the details
@@ -208,13 +231,23 @@ WHAT = {  # how each action is found, and what it misses; see standing/README.md
     "smiling": "a small expression model (trained on FER2013) on each face, cut out around the pose model's "
                "eyes: the median 'happy' probability over 5 frames in 0.8 s is 0.6 or more. Only faces "
                "with 11 px or more between the eyes are judged (close-ups at 144p).",
-    "talking": "the MediaPipe face landmark model on each face: the gap between the lips changes by 0.12 "
-               "or more (in outer-eye-corner widths) within 0.8 s. Faces from 6 px between the eyes are "
-               "judged. Laughing, chewing and singing look the same; someone talking off camera is not seen.",
+    "talking": "each visible face's mouth movement (the MediaPipe face landmark model; faces from 6 px between "
+               "the eyes) together with the sound: where the sound is clear, a person is talking when speech is "
+               "heard and their mouth is the one moving, and nobody is talking when no speech is heard; where it is "
+               "not (a loud background, no sound track), when the lips move by 0.12 or more within 0.8 s. Voices "
+               "(A, B...) come from the sound, per video.",
+    "silent": "the same faces and sound as talking: a visible face that is not talking, either listening to "
+              "someone else (voices_heard) or with nobody speaking.",
+    "running": "how fast each person's body travels over the ground in extra samples at 5 per second around "
+               "every moment a whole body is in view, with the camera's movement (pan, tilt, zoom) taken out: "
+               "4 torso lengths a second or more (a brisk walk is up to about 3.5).",
+    "walking": "how far each person's body travels between the 1-fps samples, with the camera's movement "
+               "taken out: 0.6 torso lengths a second or more (or walking towards or away from the camera), "
+               "upright and not seated. People are followed by position, size and the colours of their clothes.",
 }
 
 
-def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_videos, hours, count):
+def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_videos, hours, count, voices=()):
     """README.md for an action other than standing: what was found, and the review so far."""
     confirmed = [r for r in rows if r["verdict"] == "confirmed"]
     shown = [r for r in rows if r["verdict"] != "false alarm"]
@@ -251,8 +284,20 @@ def action_readme(action, rows, intro_rows, after_rows, dropped, start_rows, n_v
         md += [f"Confirmed {action} appears in **{len({r['video'] for r in confirmed})} videos** and adds up to "
                f"**{sum(float(r['duration_s']) for r in confirmed) / 60:.1f} minutes**.", ""]
     md += [f"The full list, with titles, YouTube links that open at each section and the verdict, is in "
-           f"[`{action}_sections.csv`]({action}_sections.csv).", "",
-           "## Sections by video (all but false alarms)", "",
+           f"[`{action}_sections.csv`]({action}_sections.csv).", ""]
+    if voices:
+        md += ["## Voices", "",
+               "From the sound, per video (A speaks most; the same person has a different letter in another "
+               "video). Who spoke when, and whether they were on screen, is in [`speech.csv`](speech.csv).", "",
+               "| Video | Title | Voice | Minutes | Turns | Minutes seen talking | Sound clear |", "|---|---|---|---|---|---|---|"]
+        md += [f"| `{v['video']}` | {v['title'].replace('|', '/')} | {v['voice']} | {float(v['seconds']) / 60:.1f} | "
+               f"{v['turns']} | {float(v['on_screen_seconds']) / 60:.1f} | {float(v['sound_trusted'] or 0):.0%} |"
+               for v in voices]
+        md += ["", "Where the sound is not clear (a loud background), voices are unreliable and talking was "
+               "judged from the faces alone."]
+        md += [""]
+    md += [
+"## Sections by video (all but false alarms)", "",
            "| Uploaded | Video | Title | Start | End | Seconds | Verdict | Note |",
            "|---|---|---|---|---|---|---|---|"]
     for r in shown:

@@ -5,11 +5,19 @@ every detected person as standing, sitting or unknown from their hip/knee/ankle 
 and joins standing frames into time ranges.
 
 --action picks what to look for (default standing):
-    standing, sitting   the leg-geometry rules below
-    jumping             the lowest foot and the hips rise and come back down; only the moments
-                        with a whole body in view are sampled again, at 5 fps (actions.py)
-    smiling, talking    each face, found from the pose model's eye and nose points, is measured
-                        by two small face models over a short burst of frames (actions.py)
+    standing, sitting   the leg-geometry rules below; --motion still (or moving) also uses how
+                        far people travel between samples (sitting: still by default)
+    walking             upright people whose body travels 0.6-4 torso lengths a second between
+                        the 1-fps samples, with the camera's pan, tilt and zoom taken out (actions.py)
+    running             4 torso lengths a second or more, in 5-fps samples taken again around
+                        every moment a whole body is in view (actions.py)
+    jumping             the lowest foot and the hips rise and come back down, in the same
+                        5-fps samples (actions.py)
+    smiling             each face, found from the pose model's eye and nose points, is measured
+                        by a small expression model over a short burst of frames (actions.py)
+    talking, silent     the faces' mouth movement together with the sound, where it is clear:
+                        whether anyone speaks and which voice (audio.py); each face keeps its
+                        own voice; also who spoke when (speech.csv)
 All actions share the same pose-model output, so a second action on the same videos does not
 run the pose model again.
 
@@ -23,11 +31,13 @@ Usage (from the youtube-analyser folder):
     .venv/bin/python standing/detect_standing.py *.mp4 --out standing/output
     .venv/bin/python standing/detect_standing.py *.mp4 --out standing/output --action talking
 
-Outputs in --out (for an action other than standing, the files below except poses/ and
-faces/ are in --out/<action>/ instead, with the action's name in place of "standing"):
+Outputs in --out (for an action other than standing, the files below except poses/, faces/,
+audio/ and camera/ are in --out/<action>/ instead, with the action's name in place of "standing"):
     poses/<video>.npz     every person found in every sampled frame (17 body points each)
                           (<video>.dense.npz: the extra samples for jumping)
-    faces/<video>.npz     face measurements for smiling and talking
+    faces/<video>.npz     face measurements for smiling, talking and silent
+    audio/<video>.npz     speech and voices in the sound, for talking and silent
+    camera/<video>.npz    the camera's movement between samples, for walking, sitting and --motion
     frames/<video>.csv    one row per sampled frame
     segments/<video>.csv  standing sections of that video (its presence marks the video done)
     thumbs/*.jpg          best frame of each section, with the detected skeletons drawn
@@ -36,6 +46,7 @@ faces/ are in --out/<action>/ instead, with the action's name in place of "stand
     dropped.csv           sections dropped as still figures
     interview_starts.csv  where each video's interview starts
     review.html           thumbnails with YouTube links at each section's start time
+    speech.csv, voices.csv  talking and silent: who spoke when, and each video's voices
 """
 import argparse
 import csv
@@ -60,7 +71,8 @@ except ImportError:  # onnxruntime alone still works, just slower
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import intro  # noqa: E402  (standing/intro.py: where the interview starts)
-import actions  # noqa: E402  (standing/actions.py: rules for jumping, smiling and talking)
+import actions  # noqa: E402  (standing/actions.py: rules for jumping, smiling, talking, walking)
+import audio  # noqa: E402  (standing/audio.py: speech and voices in the sound)
 DEFAULT_MODEL = HERE / "models" / "yolo11s-pose.onnx"
 NAME_RE = re.compile(r"^(\d{8})_(.{11})$")
 
@@ -90,10 +102,27 @@ ACTIONS = {
                 "min_frames": 1, "max_gap": 4, "still": False},
     "smiling": {"states": ("smiling", "not smiling", "unknown"), "stats": ("happy", "eyes"), "score": "happy",
                 "min_frames": 2, "max_gap": 2, "still": True},
-    "talking": {"states": ("talking", "quiet", "unknown"), "stats": ("mouth_move", "eyes"), "score": "mouth_move",
-                "min_frames": 2, "max_gap": 2, "still": False},
+    "talking": {"states": ("talking", "silent", "unknown"), "stats": ("mouth_move", "eyes"), "score": "mouth_move",
+                "min_frames": 2, "max_gap": 2, "still": False, "notes": ("voice", "by")},
+    # a visible face that is not talking: listening, or nobody speaking
+    "silent": {"states": ("silent", "talking", "unknown"), "stats": ("mouth_move", "eyes"), "score": "eyes",
+               "min_frames": 2, "max_gap": 1, "still": True, "notes": ("heard", "by")},  # talking ends it
+    # moving across the ground upright, from how far the body travels between 1-fps samples
+    "walking": {"states": ("walking", "running", "still", "unknown"), "stats": ("speed",), "score": "speed",
+                "min_frames": 2, "max_gap": 1, "still": False},
+    # in jumping's 5-fps samples: 0.6 s of running, with gaps up to 0.6 s
+    "running": {"states": ("running", "walking", "still", "unknown"), "stats": ("speed",), "score": "speed",
+                "min_frames": 3, "max_gap": 2, "still": False},
 }
 ROUND = {"knee": 0, "eyes": 1}  # decimals in the CSVs; everything else has 2
+# notes: what the people showing the action say about it, listed per section (voices heard
+# while talking or while silent, and whether it was judged from the sound and the face or the
+# face alone), in these columns
+NOTE_COLUMNS = {"voice": "voices", "heard": "voices_heard", "by": "judged_by"}
+FACE_ACTIONS = ("smiling", "talking", "silent")
+SOUND_ACTIONS = ("talking", "silent")
+MOTION = {"standing": "any", "sitting": "still", "walking": "moving"}  # default --motion per action
+DENSE_ACTIONS = ("jumping", "running")  # judged in the 5-fps samples around whole bodies
 
 
 def frame_fields(action="standing"):
@@ -102,8 +131,14 @@ def frame_fields(action="standing"):
 
 
 def segment_fields(action="standing"):
+    notes = [NOTE_COLUMNS[n] for n in ACTIONS[action].get("notes", ())]
     return ["video", "start_s", "end_s", "start", "end", "duration_s", f"{action}_frames",
-            f"max_people_{action}", f"best_{ACTIONS[action]['score']}", "still_diff", "youtube", "thumb"]
+            f"max_people_{action}", f"best_{ACTIONS[action]['score']}", *notes, "still_diff", "youtube", "thumb"]
+
+
+SPEECH_FIELDS = ["video", "start_s", "end_s", "start", "end", "duration_s", "voice", "on_screen", "sound_trusted",
+                 "youtube"]
+VOICE_FIELDS = ["video", "voice", "seconds", "turns", "on_screen_seconds", "sound_trusted", "thumb"]
 
 
 FRAME_FIELDS, SEGMENT_FIELDS = frame_fields(), segment_fields()  # standing's
@@ -319,12 +354,11 @@ def infer(path, model, fps, conf, windows=None):
     """Run the pose model on every sampled frame. Returns the arrays saved in poses/*.npz.
 
     With windows (a list of (start, end) seconds), only frames inside them are sampled, and
-    each frame's window number and the picture's shift from the frame before (the camera
-    moving; phase correlation, with its response, which drops at a cut) are added.
+    each frame's window number, the camera's movement from the frame before (shift, scale, and
+    response, which drops at a cut) and each person's look are added (actions.camera_motion).
     """
     w, h = probe(path)
-    times, frame, confs, boxes, kps = [], [], [], [], []
-    motion = {"window": [], "shift": [], "response": []}
+    times, frame, confs, boxes, kps, window = [], [], [], [], [], []
 
     def images():
         if windows is None:
@@ -332,15 +366,9 @@ def infer(path, model, fps, conf, windows=None):
                 times.append(t)
                 yield img
             return
-        hann, prev = cv2.createHanningWindow((w, h), cv2.CV_32F), (None, None)
         for n, t, img in read_windows(path, windows, fps, w, h):
-            grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            (dx, dy), r = cv2.phaseCorrelate(prev[1], grey, hann) if prev[0] == n else ((np.nan, np.nan), 0.0)
-            prev = (n, grey)
             times.append(t)
-            motion["window"].append(n)
-            motion["shift"].append((dx, dy))
-            motion["response"].append(r)
+            window.append(n)
             yield img
 
     for i, (c, b, k) in enumerate(model.run(images(), conf) if model is not None else ()):
@@ -353,10 +381,11 @@ def infer(path, model, fps, conf, windows=None):
            "conf": cat(confs, (0,)), "box": cat(boxes, (0, 4)), "kp": cat(kps, (0, 17, 3)),
            "size": np.array([w, h]), "fps": np.float32(fps)}
     if windows is not None:  # times like 7.4 s are kept exact (float32 would print 7.400000095)
-        out.update(t=np.array(times, np.float64),
-                   window=np.array(motion["window"], np.int32), response=np.array(motion["response"], np.float32),
-                   shift=np.array(motion["shift"], np.float32).reshape(-1, 2),
+        out.update(t=np.array(times, np.float64), window=np.array(window, np.int32),
                    windows=np.array(windows, np.float32).reshape(-1, 2))
+        # the camera's movement between the samples, measured around the people, and their looks
+        out.update(actions.camera_motion(read_windows(path, windows, fps, w, h), out),
+                   camera_version=np.int32(actions.CAMERA_VERSION))
     return out
 
 
@@ -457,11 +486,16 @@ def label_people(poses, action="standing", extra=None):
     """Everyone in every sampled frame, with a state for the action.
 
     Returns (timeline, people per frame): timeline is poses, except for jumping, where it is the
-    dense samples (extra). For smiling and talking, extra is the face measurements.
+    dense samples. extra is what action_input() made: jumping's dense samples; smiling's face
+    measurements; for talking and silent {"faces", "audio"} (audio None without sound); for
+    standing, sitting and walking {"camera", "motion"}, or None to ignore movement (standing's
+    default, which keeps its results as they were).
     """
+    h = int(poses["size"][1])
     if action == "jumping":
         return extra, actions.label_jumps(extra)
-    h = int(poses["size"][1])
+    if action == "running":
+        return extra, actions.label_runs(extra, seated=lambda kp: is_seated(kp, h))
     by_frame = [[] for _ in poses["t"]]
     for j, f in enumerate(poses["frame"]):
         state, meas = classify(poses["kp"][j], h)
@@ -474,9 +508,45 @@ def label_people(poses, action="standing", extra=None):
                 p["state"] = "sitting"
             elif action == "sitting" and p["state"] == "sitting" and not seated(p["m"]):
                 p["state"] = "unknown"
-    if action in ("smiling", "talking"):
+    if action == "smiling":
         actions.label_faces(by_frame, poses, extra, action)
+    elif action in SOUND_ACTIONS:
+        sound, heard = extra.get("audio"), None
+        if sound is not None:
+            voices = audio.frame_voices(sound)
+            burst, fps = actions.BURST_N * actions.BURST_STEP, float(poses["fps"])
+            heard = [audio.heard(sound, actions.picture_time(t, fps), actions.picture_time(t, fps) + burst, voices)
+                     for t in poses["t"].tolist()]
+        actions.label_faces(by_frame, poses, extra["faces"], action, heard, extra.get("camera"))
+    elif extra is not None:
+        label_movement(by_frame, poses, action, extra["camera"], extra["motion"])
     return poses, by_frame
+
+
+def is_seated(kp, img_h):
+    """A person the stricter sitting rules call seated (see seated())."""
+    state, m = classify(kp, img_h)
+    return state == "sitting" and seated(m)
+
+
+def label_movement(by_frame, poses, action, camera, motion):
+    """Walking: upright people whose body travels 0.6-4 torso lengths a second between samples
+    (actions.label_motion) are walking; faster is running (the running action judges that in the
+    5-fps samples); slower is still. Standing and sitting with --motion still (or moving): people
+    whose movement says otherwise are relabelled walking or running (or still); people who could
+    not be followed keep their label."""
+    speed = actions.label_motion(poses, camera)
+    for people in by_frame:
+        for p in people:
+            state = actions.motion_state(float(speed[p["j"]]))
+            if state is not None:
+                p["m"]["speed"] = float(speed[p["j"]])
+            if action == "walking":
+                upright = not (p["state"] == "sitting" and seated(p["m"]))
+                p["state"] = "unknown" if state is None else state if upright else "still"
+            elif p["state"] == action and state is not None and motion != "any" \
+                    and (state != "still") != (motion == "moving"):
+                p["state"] = state
 
 
 def find_sections(poses, name, min_frames, max_gap, interview_start=0, action="standing", extra=None):
@@ -527,6 +597,10 @@ def join_sections(poses, by_frame, name, min_frames, max_gap, since=0.0, until=m
                    "most": len(active), "best": -math.inf, "boxes": []}
             segments.append(cur)
         cur["boxes"].append((t, [p["box"] for p in active]))
+        for note in a.get("notes", ()):  # voices ("A+B") are listed one by one
+            cur.setdefault("notes", {}).setdefault(note, set()).update(
+                v for p in active for v in (str(p["m"].get(note) or "").split("+") if note != "by"
+                                            else [p["m"].get("by")]) if v)
         if score > cur["best"]:  # compared with the rounded best, as the CSV shows it
             cur.update(best=rounded(a["score"], score), best_t=t, best_people=people)
 
@@ -534,6 +608,7 @@ def join_sections(poses, by_frame, name, min_frames, max_gap, since=0.0, until=m
     for s in segments:
         if action != "standing":  # jumping's 0.2 s steps would otherwise show as 3.4000000000000004
             s.update(start_s=round(s["start_s"], 3), end_s=round(s["end_s"], 3))
+        s.update({NOTE_COLUMNS[k]: (" " if k != "by" else ", ").join(sorted(v)) for k, v in s.get("notes", {}).items()})
         s.update({f"{action}_frames": s["n"], f"max_people_{action}": s["most"], f"best_{a['score']}": s["best"]},
                  start=hms(s["start_s"]), end=hms(s["end_s"]), duration_s=round(s["end_s"] - s["start_s"], 1))
     return frames, segments
@@ -620,27 +695,65 @@ def find_interview_start(path, bank):
     return {"video": path.name, **r, "interview_start": hms(r["interview_start_s"])}
 
 
-def action_input(path, poses, action, pose_model, face_models, conf, jump_fps=actions.JUMP_FPS):
-    """What an action needs besides the poses: the dense samples for jumping, faces for smiling
-    and talking, nothing for standing and sitting. pose_model / face_models are only used when
-    needed, and may be functions that load them (a PoseModel is callable itself, so the type
-    tells them apart)."""
-    if action == "jumping":
-        _, by_frame = label_people(poses)
-        states = {p["j"]: p["state"] for people in by_frame for p in people}
-        windows = actions.jump_windows(poses, [states[j] for j in range(len(poses["frame"]))])
-        if not windows:  # nobody in full view: nothing to sample, so the model is not needed
-            model = None
-        else:
-            model = pose_model if isinstance(pose_model, PoseModel) else pose_model()
-        return infer(path, model, jump_fps, conf, windows)
-    if action in ("smiling", "talking"):
-        w, h = (int(x) for x in poses["size"])
-        models = face_models if isinstance(face_models, actions.FaceModels) else face_models()
-        faces = actions.analyse_faces(read_frames(path, 1 / actions.BURST_STEP, w, h), poses, models)
-        faces["poses_n"] = np.int32(len(poses["frame"]))
-        return faces
-    return None
+def _model(models, name):
+    """models[name], loading it first if it is a function that loads it."""
+    m = models[name]
+    return m() if callable(m) and not isinstance(m, PoseModel) else m
+
+
+def dense_input(path, poses, models, conf, jump_fps=actions.JUMP_FPS):
+    """Jumping: the pose model again at jump_fps around every moment a whole body is in view."""
+    _, by_frame = label_people(poses)
+    states = {p["j"]: p["state"] for people in by_frame for p in people}
+    windows = actions.jump_windows(poses, [states[j] for j in range(len(poses["frame"]))])
+    model = _model(models, "pose") if windows else None  # nobody in full view: nothing to sample
+    return infer(path, model, jump_fps, conf, windows)
+
+
+def face_input(path, poses, models):
+    """Smiling, talking, silent: every usable face measured over its burst (actions.analyse_faces)."""
+    w, h = (int(x) for x in poses["size"])
+    faces = actions.analyse_faces(read_frames(path, 1 / actions.BURST_STEP, w, h), poses, _model(models, "faces"))
+    faces["poses_n"] = np.int32(len(poses["frame"]))
+    return faces
+
+
+def sound_input(path, models):
+    """Talking, silent: speech and voices in the sound (audio.analyse); has_sound False without sound."""
+    wav = audio.load(path)
+    if wav is None:
+        return {"has_sound": np.bool_(False)}
+    return {**audio.analyse(wav, _model(models, "voices")), "has_sound": np.bool_(True)}
+
+
+def camera_input(path, poses):
+    """Walking, and standing or sitting still: the camera's movement between the 1-fps samples."""
+    w, h = (int(x) for x in poses["size"])
+    steps = actions.CAMERA_STEPS
+    camera = actions.camera_motion(read_frames(path, float(poses["fps"]) * steps, w, h), poses, steps)
+    camera["poses_t"], camera["steps"] = np.int32(len(poses["t"])), np.int32(steps)
+    camera["camera_version"] = np.int32(actions.CAMERA_VERSION)
+    return camera
+
+
+def action_input(path, poses, action, models, conf, jump_fps=actions.JUMP_FPS, motion=None, use_sound=True):
+    """What an action needs besides the poses (see label_people), computed here without caching.
+
+    models: {"pose", "faces", "voices"}, each a model or a function that loads it; only the ones
+    the action needs are used. motion: "any", "still" or "moving" (default MOTION[action]).
+    """
+    if action in DENSE_ACTIONS:
+        return dense_input(path, poses, models, conf, jump_fps)
+    if action == "smiling":
+        return face_input(path, poses, models)
+    if action in SOUND_ACTIONS:
+        sound = sound_input(path, models) if use_sound else {"has_sound": np.bool_(False)}
+        return {"faces": face_input(path, poses, models), "audio": sound if sound["has_sound"] else None,
+                "camera": camera_input(path, poses)}
+    motion = motion or MOTION.get(action, "any")
+    if motion == "any" and action != "walking":
+        return None
+    return {"camera": camera_input(path, poses), "motion": motion}
 
 
 def detect(path, poses, action, min_frames, max_gap, interview_start=0, extra=None):
@@ -662,7 +775,7 @@ def analyse(path, poses, args, out_dir, bank=None, extra=None):
     action = getattr(args, "action", "standing")
     stem = path.stem
     w, h = (int(x) for x in poses["size"])
-    fps = float((extra if action == "jumping" else poses)["fps"])  # the rate the sections were sampled at
+    fps = float((extra if action in DENSE_ACTIONS else poses)["fps"])  # the rate the sections were sampled at
     m = NAME_RE.match(stem)
     url = f"https://www.youtube.com/watch?v={m.group(2)}" if m else ""
     start = find_interview_start(path, bank)
@@ -676,12 +789,70 @@ def analyse(path, poses, args, out_dir, bank=None, extra=None):
         cv2.imwrite(str(out_dir / "thumbs" / s["thumb"]), draw(img, s["best_people"], action=action))
         s["youtube"] = f"{url}&t={int(s['start_s'])}s" if url else ""
     fields = segment_fields(action)
+    if action in SOUND_ACTIONS:
+        speech, voices = speech_timeline(path, poses, action, extra, out_dir / "thumbs", url)
+        write_csv(out_dir / "speech" / f"{stem}.csv", SPEECH_FIELDS, speech)
+        write_csv(out_dir / "voices" / f"{stem}.csv", VOICE_FIELDS, voices)
     write_csv(out_dir / "frames" / f"{stem}.csv", frame_fields(action), frames)
     write_csv(out_dir / "interview" / f"{stem}.csv", INTERVIEW_FIELDS, [start])
     write_csv(out_dir / "intro" / f"{stem}.csv", fields, in_intro)
     write_csv(out_dir / "dropped" / f"{stem}.csv", fields, dropped)
     write_csv(out_dir / "segments" / f"{stem}.csv", fields, segments)  # written last: marks done
     return len(frames), len(segments), len(dropped), len(in_intro), start["interview_start"]
+
+
+def speech_timeline(path, poses, action, extra, thumbs=None, url=""):
+    """Who spoke when (the sound's turns), whether they were on screen, and a summary per voice.
+
+    A turn is on screen ("yes") when, in most of its sampled seconds with a face that could be
+    judged, a visible person was talking with that voice; "no" when faces were judged but none
+    was; "unknown" when no face could be judged. Each voice's thumbnail is the sampled frame
+    where it was matched to the largest single talking face. Returns (turn rows, voice rows).
+    """
+    sound = extra.get("audio")
+    if sound is None:
+        return [], []
+    _, by_frame = label_people(poses, action, extra)
+    voices = audio.frame_voices(sound)
+    t = actions.picture_time(poses["t"].astype(np.float64), float(poses["fps"])) \
+        + actions.BURST_N * actions.BURST_STEP / 2  # the middle of each sample's burst
+    rows, best = [], {}
+    for s, e, k in audio.turns(sound, voices):
+        v = audio.voice_name(k)
+        judged = seen = 0
+        for f in range(np.searchsorted(t, s), np.searchsorted(t, e)):
+            faces = [p for p in by_frame[f] if p["state"] in ("talking", "silent")]
+            talking = [p for p in faces if p["state"] == "talking" and v in str(p["m"].get("voice", "")).split("+")]
+            judged += bool(faces)
+            seen += bool(talking)
+            if len(talking) == 1 and p_size(talking[0]) > best.get(v, (0,))[0]:
+                best[v] = (p_size(talking[0]), f, talking[0])
+        rows.append({"video": path.name, "start_s": s, "end_s": e, "start": hms(s), "end": hms(e),
+                     "duration_s": round(e - s, 1), "voice": v,
+                     "on_screen": "unknown" if not judged else "yes" if seen >= judged / 2 else "no",
+                     "sound_trusted": "yes" if audio.heard(sound, s, e, voices)[0] else "no",
+                     "youtube": f"{url}&t={int(s)}s" if url else ""})
+    summary = []
+    for v in sorted({r["voice"] for r in rows}):
+        mine = [r for r in rows if r["voice"] == v]
+        thumb = ""
+        if thumbs is not None and v in best:
+            _, f, person = best[v]
+            w, h = (int(x) for x in poses["size"])
+            thumb = f"{path.stem}_voice_{v}.jpg"
+            img = grab_frame(path, float(poses["t"][f]), float(poses["fps"]), w, h)
+            cv2.imwrite(str(thumbs / thumb), draw(img, [person], action="talking"))
+        summary.append({"video": path.name, "voice": v, "seconds": round(sum(r["duration_s"] for r in mine), 1),
+                        "turns": len(mine), "thumb": thumb,
+                        "sound_trusted": round(sum(r["duration_s"] for r in mine if r["sound_trusted"] == "yes")
+                                               / max(sum(r["duration_s"] for r in mine), 1e-9), 2),
+                        "on_screen_seconds": round(sum(r["duration_s"] for r in mine if r["on_screen"] == "yes"), 1)})
+    return rows, summary
+
+
+def p_size(p):
+    """A person's face size (eye distance) for picking the clearest face."""
+    return float(p["m"].get("eyes") or 0)
 
 
 def glob_escape(s):
@@ -709,20 +880,43 @@ def combine(out_dir, action="standing"):
                 found[kind] += list(csv.DictReader(f))
         write_csv(out_dir / f"{out}.csv", kind_fields, found[kind])
 
+    notes = [NOTE_COLUMNS[n] for n in ACTIONS[action].get("notes", ())]
+
     def cards(rows):
         return "\n".join(
             f'<figure><a href="thumbs/{html.escape(r["thumb"])}"><img src="thumbs/{html.escape(r["thumb"])}" loading="lazy"></a>'
             f'<figcaption>{html.escape(r["video"])}<br>{r["start"]} to {r["end"]} ({r["duration_s"]}s, '
             f'{r[f"{action}_frames"]} frames, pixel change {r["still_diff"] or "n/a"})'
+            + "".join(f"<br>{n.replace('_', ' ')}: {html.escape(r[n] or 'none')}" for n in notes)
             + (f' · <a href="{html.escape(r["youtube"])}">YouTube</a>' if r["youtube"] else "")
             + "</figcaption></figure>" for r in rows)
+
+    voices_html = ""
+    if action in SOUND_ACTIONS:
+        for kind, kind_fields in (("speech", SPEECH_FIELDS), ("voices", VOICE_FIELDS)):
+            found[kind] = []
+            for p in sorted((out_dir / kind).glob("*.csv")):
+                with open(p, newline="") as f:
+                    found[kind] += list(csv.DictReader(f))
+            write_csv(out_dir / f"{kind}.csv", kind_fields, found[kind])
+        voices_html = (
+            f"<h2>Voices ({len(found['voices'])})</h2><p>Each video's voices, from the sound (A speaks most). "
+            "The picture is the clearest moment the voice was matched to a talking face; without one, the voice "
+            "was never seen talking (off screen, or faces too small or turned away). Who spoke when is in "
+            "speech.csv.</p><main>" + "\n".join(
+                (f'<figure><a href="thumbs/{html.escape(r["thumb"])}"><img src="thumbs/{html.escape(r["thumb"])}" '
+                 'loading="lazy"></a>' if r["thumb"] else "<figure>")
+                + f'<figcaption>{html.escape(r["video"])}: voice {r["voice"]}, {float(r["seconds"]) / 60:.1f} min in '
+                f'{r["turns"]} turns, {float(r["on_screen_seconds"]) / 60:.1f} min of it seen talking'
+                + ("" if float(r["sound_trusted"] or 0) >= 0.5 else " (sound too noisy to trust)") + '</figcaption></figure>'
+                for r in found["voices"]) + "</main>")
 
     (out_dir / "review.html").write_text(
         f"<!doctype html><meta charset=utf-8><title>{label} sections</title>"
         "<style>body{font:14px system-ui;margin:16px;background:#fff;color:#111}"
         "main{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px}"
         "figure{margin:0}img{width:100%;border-radius:4px}figcaption{margin-top:4px}</style>"
-        f"<h1>{label} sections ({len(found['segments'])})</h1><main>{cards(found['segments'])}</main>"
+        f"<h1>{label} sections ({len(found['segments'])})</h1><main>{cards(found['segments'])}</main>{voices_html}"
         f"<h2>Dropped as still figures ({len(found['dropped'])})</h2>"
         f"<p>Statues, posters and other figures that never moved (pixel change under {STILL_DIFF}).</p>"
         f"<main>{cards(found['dropped'])}</main>"
@@ -737,27 +931,63 @@ def save_npz(path, arrays):
     path.with_suffix(".tmp.npz").replace(path)
 
 
-def load_input(v, poses, args, models):
-    """action_input() for one video, from its cache file in --out when still valid."""
-    if args.action == "jumping":
-        path = args.out / "poses" / f"{v.stem}.dense.npz"
-        check = lambda d: float(d["fps"]) == args.jump_fps
-    elif args.action in ("smiling", "talking"):
-        path = args.out / "faces" / f"{v.stem}.npz"
-        check = lambda d: (int(d["poses_n"]) == len(poses["frame"])
-                           and float(d["burst_step"]) == np.float32(actions.BURST_STEP))
-    else:
-        return None, ""
-    if path.exists() and not args.force:
+def cached(path, valid, make, force=False):
+    """(data, made): the arrays saved at path if valid(them), else make() them and save them."""
+    if path.exists() and not force:
         saved = dict(np.load(path))
-        if check(saved):
-            return saved, ""
-    extra = action_input(v, poses, args.action, models["pose"], models["faces"], args.conf, args.jump_fps)
-    save_npz(path, extra)
-    if args.action == "jumping":
-        seconds = sum(b - a for a, b in extra["windows"])
-        return extra, f"; {seconds:.0f}s sampled again at {args.jump_fps:g} fps"
-    return extra, f"; {len(extra['det'])} faces measured"
+        if valid(saved):
+            return saved, False
+    data = make()
+    save_npz(path, data)
+    return data, True
+
+
+def load_input(v, poses, args, models):
+    """action_input() for one video, each part from its cache file in --out when still valid:
+    poses/<video>.dense.npz, faces/, audio/ and camera/<video>.npz. Returns (extra, note)."""
+    out, action, notes = args.out, args.action, []
+
+    def faces():
+        d, made = cached(out / "faces" / f"{v.stem}.npz",
+                         lambda d: int(d["poses_n"]) == len(poses["frame"]) and "aligned" in d
+                         and float(d["burst_step"]) == np.float32(actions.BURST_STEP),
+                         lambda: face_input(v, poses, models), args.force)
+        if made:
+            notes.append(f"{len(d['det'])} faces measured")
+        return d
+
+    def camera():
+        return cached(out / "camera" / f"{v.stem}.npz",
+                      lambda d: int(d["poses_t"]) == len(poses["t"]) and "steps" in d
+                      and int(d.get("camera_version", 0)) == actions.CAMERA_VERSION,
+                      lambda: camera_input(v, poses), args.force)[0]
+
+    if action in DENSE_ACTIONS:
+        extra, made = cached(out / "poses" / f"{v.stem}.dense.npz",
+                             lambda d: float(d["fps"]) == args.jump_fps
+                             and int(d.get("camera_version", 0)) == actions.CAMERA_VERSION,
+                             lambda: dense_input(v, poses, models, args.conf, args.jump_fps), args.force)
+        if made:
+            notes.append(f"{sum(b - a for a, b in extra['windows']):.0f}s sampled again at {args.jump_fps:g} fps")
+    elif action == "smiling":
+        extra = faces()
+    elif action in SOUND_ACTIONS:
+        sound = None
+        if not args.no_sound:
+            sound, made = cached(out / "audio" / f"{v.stem}.npz", lambda d: True, lambda: sound_input(v, models),
+                                 args.force)
+            if not bool(sound["has_sound"]):
+                sound = None
+            if made:
+                notes.append("no sound" if sound is None else f"{int(sound['voices'])} voices, sound trusted "
+                             f"{np.mean(sound['snr_db'] >= audio.SNR_OK_DB):.0%} of the time")
+        extra = {"faces": faces(), "audio": sound, "camera": camera()}
+    else:
+        motion = args.motion or MOTION.get(action, "any")
+        if motion == "any" and action != "walking":
+            return None, ""
+        extra = {"camera": camera(), "motion": motion}
+    return extra, "".join(f"; {n}" for n in notes)
 
 
 def main():
@@ -771,12 +1001,17 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640, help="longest side fed to the model")
     ap.add_argument("--fps", type=float, default=1.0, help="frames sampled per second of video")
     ap.add_argument("--jump-fps", type=float, default=actions.JUMP_FPS,
-                    help="jumping: frames per second sampled where a whole body is in view")
+                    help="running and jumping: frames per second sampled where a whole body is in view")
     ap.add_argument("--conf", type=float, default=0.35, help="minimum person confidence")
     ap.add_argument("--min-frames", type=int, help="frames showing the action needed for a section "
-                    "(default 2; 1 for jumping)")
+                    "(default 2; 1 for jumping, 3 for running)")
     ap.add_argument("--max-gap", type=int, help="frames without it allowed inside a section "
-                    "(default 2; 4 for jumping, whose frames are 0.2 s apart)")
+                    "(default 2; 1 for walking and silent; 4 for jumping and 2 for running, whose frames are 0.2 s apart)")
+    ap.add_argument("--motion", choices=["any", "still", "moving"],
+                    help="standing and sitting: only people standing or sitting still (or moving), judged "
+                         "from how far they travel between samples (default: any for standing, still for sitting)")
+    ap.add_argument("--no-sound", action="store_true",
+                    help="talking and silent: judge from the faces alone, ignoring the sound")
     ap.add_argument("--runtime", choices=["auto", "openvino", "onnxruntime"], default="auto",
                     help="auto = OpenVINO if installed, else onnxruntime")
     ap.add_argument("--threads", type=int, default=0, help="inference threads (0 = automatic)")
@@ -794,10 +1029,12 @@ def main():
         args.max_gap = ACTIONS[action]["max_gap"]
 
     out_dir = args.out if action == "standing" else args.out / action
-    (args.out / "poses").mkdir(parents=True, exist_ok=True)
-    if action in ("smiling", "talking"):
-        (args.out / "faces").mkdir(parents=True, exist_ok=True)
-    for sub in ("frames", "segments", "dropped", "intro", "interview", "thumbs"):
+    shared = ["poses"] + ["faces"] * (action in FACE_ACTIONS) + ["audio"] * (action in SOUND_ACTIONS) \
+        + ["camera"] * (action in ("walking",) + SOUND_ACTIONS or (args.motion or MOTION.get(action, "any")) != "any")
+    for sub in shared:  # shared by all actions
+        (args.out / sub).mkdir(parents=True, exist_ok=True)
+    for sub in ("frames", "segments", "dropped", "intro", "interview", "thumbs") + \
+            (("speech", "voices") if action in SOUND_ACTIONS else ()):
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
     bank = None if args.keep_intro else intro.load_bank(args.intro_bank)
     if bank is None and not args.keep_intro:
@@ -807,10 +1044,11 @@ def main():
     def model(name):  # load each model the first time it is needed
         if name not in loaded:
             loaded[name] = (PoseModel(args.model, args.imgsz, args.threads, args.runtime) if name == "pose"
-                            else actions.FaceModels(args.runtime, args.threads))
+                            else actions.FaceModels(args.runtime, args.threads) if name == "faces"
+                            else audio.VoiceModels(args.runtime, args.threads))
         return loaded[name]
 
-    models = {"pose": lambda: model("pose"), "faces": lambda: model("faces")}
+    models = {name: (lambda name=name: model(name)) for name in ("pose", "faces", "voices")}
     # yt-dlp leaves unmerged format files such as X.f278.webm next to X.webm; skip those.
     videos = [v for v in args.videos if not re.search(r"\.f\d+$", v.stem)]
     for i, v in enumerate(videos, 1):
