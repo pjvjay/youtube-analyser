@@ -13,6 +13,7 @@ from real rows.
 | `results/outside_interview.csv` | `results/outside_interview.csv` | `make_report.py`: standing in the intros, and sections marked `after the interview` |
 | `results/interview_starts.csv` | `results/interview_starts.csv` | `make_report.py`, from `intro.py`: where each video's interview starts and how it was found (`title`, `angles`, `shared`, `short video`) |
 | `results/search/<query>/matches.csv` | `results/search/<query>/matches.csv` | `search.py`: each time a described person does the action. `person` numbers the people followed in that video; `match` is `match`, or `possible` with `--possible` (something was not seen well enough); `evidence` lists each part of the query with what was seen and `[yes]`, `[no]` or `[unknown]` |
+| `channels/someshow/searches/people-jumping/matches.csv` | `channels/<channel>/searches/<query>/matches.csv` | `channel.py`: every result of a channel search, newest video first, with the video's upload date, title and ID; `in_intro` is `True` for results in an episode's intro (title sequence, teaser), which the report lists apart. `person` is empty for an action alone (anyone doing it) |
 
 For the other actions (`make_report.py --action sitting|walking|running|jumping|smiling|talking|silent`) the same files
 are written to `results/<action>/`, with `<action>_sections.csv` in place of

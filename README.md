@@ -15,6 +15,17 @@ It can also **search for a particular person doing an action**, described by wha
 sound like or by name: `search.py "woman with purple hair talking" *.mp4` (see
 [below](#finding-a-person)).
 
+And it can do all of that for **a whole YouTube channel in one command**, from the channel's
+address to a report with a link to each moment found: it downloads the videos at the lowest
+resolution while it analyses the ones already downloaded, computes only what the query needs, and
+skips a video after a quick look at its keyframes when nobody in it has the colours asked for
+(see [below](#searching-a-whole-channel)):
+
+```bash
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "people jumping"
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "woman with purple hair talking"
+```
+
 **Results** are written locally to `results/` and are not committed, because they name the
 videos. [`samples/`](samples/README.md) shows every results file with a few made-up rows. On the
 test set (248 videos, 210 hours) the detector reported 92 standing sections during the
@@ -29,6 +40,7 @@ in intros (nearly all title sequences) were left out automatically.
 | `standing/actions.py` | The rules for walking, running and jumping (people followed over time, with the camera's pan, tilt and zoom taken out) and smiling / talking / silent (faces found from the pose model's eyes, measured by two small face models, each face keeping its own voice) |
 | `standing/audio.py` | The sound: when anyone is speaking, whether the sound is clear enough to trust, and which voice (A, B, ...), with its pitch |
 | `standing/search.py` | Finds a described person ("woman with purple hair", "man in a blue coat", "deep voice", an enrolled name) doing an action. [README](standing/README.md#finding-a-person-searchpy) |
+| `standing/channel.py` | A whole channel in one command: lists and downloads its videos (yt-dlp, 144p, in parallel with the analysis), searches them and writes `report.html` / `report.md` / `matches.csv` with a YouTube link to each moment. [README](standing/README.md#searching-a-whole-channel-channelpy) |
 | `standing/people.py`, `standing/people.toml` | Each person's characteristics, followed through a shot: hair and clothes colours, apparent gender and age, their voice; the words, colours and thresholds the search uses, and the people enrolled by name |
 | `standing/intro.py` | Finds where each episode's interview starts, after the teaser, title sequence and ads, by matching title footage shared across episodes |
 | `standing/make_report.py` | Turns a detector run plus `results/verdicts.csv` into the results files |
@@ -38,13 +50,14 @@ in intros (nearly all title sequences) were left out automatically.
 | `Dockerfile` | The API as one container (ffmpeg, OpenVINO, model) for local use or Azure Container Apps |
 | `docs/running.md` | **How to run everything, step by step**: setup, downloading, each action, reviewing, reports, the API, the tests, troubleshooting |
 | `docs/azure.md` | Running it on Azure so you pay only for compute, with costs |
-| `tests/` | 126 tests: the rules on made-up measurements, standing against the original code, every action end to end on made clips with known truth, and the search for people by looks, voice and name. [README](tests/README.md) |
+| `tests/` | 137 tests: the rules on made-up measurements, standing against the original code, every action end to end on made clips with known truth, the search for people by looks, voice and name, and whole-channel searches through a stand-in for yt-dlp. [README](tests/README.md) |
 | `samples/` | The format of the local-only files, with made-up names |
 
 **Kept locally, not in this repository** (see `.gitignore`): the videos, the yt-dlp
 `cookies.txt` and download archive, the video inventory (`analysis/`), the results and manual
-review (`results/`), the detector's output (`standing/output/`), and the bank of title frames
-(`standing/models/intro_bank.npz`), which is made from the videos.
+review (`results/`), the detector's output (`standing/output/`), the channel searches
+(`channels/`), and the bank of title frames (`standing/models/intro_bank.npz`), which is made from
+the videos.
 
 ## Quick start
 
@@ -110,10 +123,32 @@ thumbnail). At 144p, dyed hair and clothes colours are reliable, natural hair sh
 roughly so, and apparent gender comes mainly from the voice of someone seen talking; details and
 measurements in [standing/README.md](standing/README.md#finding-a-person-searchpy).
 
+### Searching a whole channel
+
+```bash
+.venv/bin/pip install -U yt-dlp            # once, and again when YouTube downloads start failing
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "people jumping"
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "woman with purple hair talking" --max-videos 50
+```
+
+The first finds **everyone doing an action**, the second **a described person doing it**. It writes
+`channels/<channel>/searches/<query>/report.html` (thumbnails, grouped by video, each linking to
+its moment on YouTube), `report.md` (the same as a list of links) and `matches.csv`, and rewrites
+them after every video, so you can watch the results arrive. An interrupted run carries on where
+it stopped, and a second query reuses the downloaded videos and everything computed.
+
+What makes it quick: 144p downloads, without the sound when the query does not need it, made
+while earlier videos are analysed; only the steps the query needs, cheapest first; and for a
+query with a colour, a quick look at each video's keyframes that rules most videos out in
+seconds (on a 27-minute test video: 14 s, 115x real time, against about 390 s before these
+changes; `--speed thorough` turns it off, `--speed fastest` also shrinks the pose model's input,
+for 230x). `--shard K/N` splits a channel between several machines. Details, options and
+measurements: [standing/README.md](standing/README.md#searching-a-whole-channel-channelpy).
+
 ### Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -t . -v     # all 126, 5-10 minutes the first time
+.venv/bin/python -m unittest discover -s tests -t . -v     # all 137, 10-25 minutes the first time
 .venv/bin/python -m unittest tests.test_rules              # the rules alone, seconds
 ```
 

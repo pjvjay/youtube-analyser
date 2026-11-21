@@ -45,6 +45,52 @@ file,upload_date,video_id,title,kind,duration_min
 20240105_sampleVid01.mp4,2024-01-05,sampleVid01,Guest A | EP 1,long,62.8
 ```
 
+## 2b. Or: search a whole channel in one command
+
+If what you want is "every moment in this channel where someone jumps" or "where the woman with
+purple hair talks", `channel.py` does steps 2 to 5 for you: it lists the channel, downloads the
+videos at 144p (without the sound when the query does not need it) while it analyses the ones
+already downloaded, builds the intro bank from the first episodes, searches each video, and
+writes a report with a link to each moment:
+
+```bash
+.venv/bin/pip install -U yt-dlp                    # once; again whenever YouTube downloads start failing
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "people jumping"
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "woman with purple hair talking"
+```
+
+It prints what it understood, then a line per video with how long it took and an estimate of
+the time left, for example:
+
+```
+looking for: gender female, hair purple; action: talking
+212 videos listed; work folder channels/someshow
+intro bank built from 8 videos: 31 title frames shared by the episodes
+[1/212] 2024-05-02 20240502_sampleVid07.mp4 (58.3 min): 0 results (quick look (612 keyframes): no purple hair seen); downloaded in 9s, searched in 31s
+[2/212] 2024-04-25 20240425_sampleVid06.mp4 (61.0 min): 3 results; downloaded in 8s, searched in 14.2 min; 8x real time, about 20 h left
+...
+```
+
+(The estimate is rough: videos where the person might be take far longer than the rest.) Open
+`channels/<channel>/searches/<query>/report.html` at any time: it is rewritten after each video.
+Stop with Ctrl-C whenever you like; running the same command again carries on. Useful options:
+
+| Option | What it does |
+|---|---|
+| `--max-videos 20` | Only the newest 20 videos (try a query on a few first) |
+| `--since 20240101`, `--until 20241231` | Only videos uploaded in these dates |
+| `--speed fastest` | About 2x faster again: the pose model at a smaller input (finds fewer small, distant people) |
+| `--speed thorough` | No quick look: every second of every video (for someone who may be on screen only briefly) |
+| `--delete-videos` | Delete each video once searched, to save disk |
+| `--cookies cookies.txt` | If YouTube asks yt-dlp to sign in |
+| `--shard 1/2` and `--shard 2/2` | Split the channel between two machines (or two runs) sharing the work folder |
+| `--possible`, `--explain`, `--config` | As for `search.py` (step 4b) |
+
+A second query on the same channel reuses the downloaded videos and everything computed, so it
+is much quicker. To look through the results for one action in the usual way as well (review
+video, verdicts, report), run steps 3 to 5 on `channels/<channel>/videos/` with
+`--out channels/<channel>/output`.
+
 ## 3. Find where each interview starts (once, and after a new title design)
 
 ```bash
@@ -144,8 +190,9 @@ the evidence for each part of the query (`hair purple (100% of 36) [yes]`) and a
 
 Options: `--action` (instead of an action in the query; `visible` for any time they are in view),
 `--possible` (also list people who might match: some part not seen, such as hair on a small face),
-`--explain` (print what was seen of every person), `--config my_people.toml`, `--keep-intro`,
-`--out`, `--results`.
+`--explain` (print what was seen of every person), `--quick` (with a colour in the query, a look
+at each video's keyframes first, skipping videos where nobody has it; see step 2b),
+`--config my_people.toml`, `--keep-intro`, `--out`, `--results`.
 
 **To find someone by name**, enrol their voice: copy `standing/people.toml` to, say,
 `my_people.toml`, keep only what you change, and add
@@ -228,7 +275,7 @@ See [`docs/azure.md`](azure.md) for running it on Azure.
 ```
 
 The first full run builds the test clips (`tests/make_fixtures.py`) and runs the detector on
-them, 5-10 minutes on a 4-core machine; later runs reuse both and take a few minutes. Delete
+them, 10-25 minutes on a 4-core machine; later runs reuse both and take a few minutes. Delete
 `tests/.cache/` to start from nothing. [`tests/README.md`](../tests/README.md) lists what each test
 checks and where the test media come from.
 
@@ -245,6 +292,8 @@ checks and where the test media come from.
 | Nothing found for walking, running or jumping | They need people's shoulders and hips (running and jumping: their whole body) in view: close-ups are never judged |
 | A change of thresholds has no effect | Run again with `--reclassify` (done videos are otherwise skipped) |
 | A search finds nobody | Run it with `--explain`: each person's hair, clothes, gender and voice as seen. Faces too small for hair (under 10 px between the eyes) or gender (12 px) are "not seen": add `--possible`. Gender by voice needs them seen talking |
+| `channel.py`: `download failed: ... Sign in to confirm you're not a bot` | YouTube wants a signed-in session: `--cookies cookies.txt` (exported from your browser) or `--cookies-from-browser firefox`; `--yt-dlp-arg "--sleep-requests 1"` slows the requests down |
+| `channel.py`: every download fails | Update yt-dlp (`.venv/bin/pip install -U yt-dlp`) and follow what its error message says (YouTube changes often) |
 | A search lists ignored words | Those words are not in `standing/people.toml`; rephrase, or add them there (`[words]`) |
 | Tests fail after editing the clips | Bump `VERSION` in `tests/make_fixtures.py` so the clips and results are rebuilt |
 

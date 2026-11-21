@@ -639,6 +639,17 @@ class Tracks(unittest.TestCase):
         self.assertEqual(track[0], track[1])      # one sample missed
         self.assertNotEqual(track[1], track[2])   # two missed
 
+    def test_someone_else_in_the_same_place_is_someone_else(self):
+        # a cut the camera measurement missed: another woman in the same seat, hair of another colour
+        poses = poses_of([[body(100)] for _ in range(4)])
+        purple, brown = [79, 156, 107], [102, 130, 151]
+        hair = np.array([purple, purple, brown, brown], np.float32)
+        self.assertEqual(len(set(characteristics.tracks(poses))), 1)
+        track = characteristics.tracks(poses, hair=hair)
+        self.assertEqual((track[0] == track[1], track[1] == track[2], track[2] == track[3]), (True, False, True))
+        hair[1] = np.nan                          # not measured in a sample: no evidence either way
+        self.assertEqual(len(set(characteristics.tracks(poses, hair=hair))), 2)
+
     def test_close_ups_follow_the_box_and_the_camera(self):
         def face_only(x):
             kp, _ = body(x)

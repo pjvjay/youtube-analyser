@@ -5,7 +5,7 @@
 .venv/bin/python -m unittest tests.test_rules -v           # the rules only: seconds, no video
 ```
 
-The first full run builds the test clips and runs the detector on them (5-10 minutes on a
+The first full run builds the test clips and runs the detector on them (10-25 minutes on a
 4-core machine); later runs reuse both from `tests/.cache/` and take a few minutes. Delete that
 folder to start again. Only the standard library's `unittest` is needed (`pytest tests` works
 too, if you have it).
@@ -17,7 +17,8 @@ too, if you have it).
 | `test_movement.py` | Walking, running and jumping end to end on 19 made clips | the models |
 | `test_talking.py` | Up to three people talking, with and without usable sound, and voices across cuts | the models |
 | `test_sound.py` | Speech and voices on real speech: one, two and three voices, crowd noise, silence, a brief extra voice, no sound | the models |
-| `test_search.py` | Searching for people by hair colour, clothes, apparent gender, voice and an enrolled name, with and without an action, on made clips of a woman (hair dyed purple or blue, or natural) and a man taking turns to talk, and on the street clips; the command line and its files | the models |
+| `test_search.py` | Searching for people by hair colour, clothes, apparent gender, voice and an enrolled name, with and without an action, on made clips of a woman (hair dyed purple or blue, or natural) and a man taking turns to talk, and on the street clips; an action alone gives the detector's sections; a video where nobody has the colour asked for stops after the colours (no faces, sound or camera pass); the quick look at keyframes; the face model run only on the few faces needed; the command line and its files | the models |
+| `test_channel.py` | A whole channel through `channel.py`, with `fake_yt_dlp.py` standing in for yt-dlp (five videos): the report's YouTube links and timestamps, the quick look ending the search in videos without the colour, 144p formats with sound only when needed (and downloading again with sound when a later query needs it), the inventory, carrying on after a stop, reusing videos for a new query, `--max-videos`, `--since`, a failed download, `--delete-videos`, a folder of videos; and five 4-minute episodes sharing a title sequence, whose results there are set apart as intro | the models, ffmpeg's `life` test source |
 | `test_tools.py` | Every action through the command line; skipping and `--reclassify`; a broken file; the reports and the review video; the HTTP API against the command line, including `who=` with a person enrolled from a recording | the models, uvicorn |
 
 ## What is covered
@@ -55,6 +56,22 @@ face-seconds with sound and 132 without); talkers must be found in at least 75% 
 with the sound (83% were) and 60% without it (70% were), because the source clip's speaker pauses
 between words. On the movement clips, 848 steady person-samples are checked: 2% came out unknown
 and none wrong.
+
+## Faster settings
+
+`DETECTOR_OPTIONS` runs the end-to-end tests with other pose model settings (into a cache folder
+of their own):
+
+```bash
+DETECTOR_OPTIONS="--imgsz 320" .venv/bin/python -m unittest tests.test_movement tests.test_talking tests.test_search tests.test_channel
+```
+
+With `--imgsz 320` (what `channel.py --speed fastest` uses) all of these passed. With
+`--imgsz 480`, and with the smaller model (`--model standing/models/yolo11n-pose.onnx`), two
+talking tests fell just short of their thresholds (talkers found in 14 of 20 seconds where 15
+were needed); the smaller model at 320 also called a man standing still walking while the
+camera panned. So 320 with the usual model is the faster setting offered, with the caveat that
+these clips have no small, distant people, which a smaller input finds less often.
 
 ## What the clips cannot tell you
 

@@ -41,7 +41,7 @@ def setUpModule():
     state["config_file"] = config
     state["config"] = people.load_config(config)
     videos = [mf.build(n) for n in CHARACTER_CLIPS + STREET_CLIPS]
-    state["searcher"] = search.Searcher(search.options(h.OUT, keep_intro=True, videos=videos), state["config"])
+    state["searcher"] = search.Searcher(h.search_options(videos=videos), state["config"])
 
 
 def tearDownModule():
@@ -152,7 +152,7 @@ class CommandLine(unittest.TestCase):
             clips = [str(mf.path(n)) for n in CHARACTER_CLIPS]
             r = subprocess.run([sys.executable, str(h.REPO / "standing" / "search.py"), "Jane talking", *clips,
                                 "--out", str(h.OUT), "--results", out, "--keep-intro", "--config",
-                                str(state["config_file"])], capture_output=True, text=True)
+                                str(state["config_file"]), *h.OPTIONS], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("looking for: name Jane; action: talking", r.stdout)
             folder = Path(out) / "jane-talking"
@@ -164,7 +164,7 @@ class CommandLine(unittest.TestCase):
             self.assertIn("Jane talking", (folder / "index.html").read_text())
 
             r = subprocess.run([sys.executable, str(h.REPO / "standing" / "search.py"), "woman with purple hair dancing",
-                                clips[0], "--out", str(h.OUT), "--results", out, "--keep-intro", "--explain"],
+                                clips[0], "--out", str(h.OUT), "--results", out, "--keep-intro", "--explain", *h.OPTIONS],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("ignored words: dancing", r.stdout)
@@ -174,8 +174,40 @@ class CommandLine(unittest.TestCase):
         saved = h.OUT / "appearance" / "duo_purple.npz"
         find("woman with purple hair", ["duo_purple"])
         before = saved.stat().st_mtime
-        find("man in a black top", ["duo_purple"])
+        find("woman with purple hair talking", ["duo_purple"])     # nothing new to measure
         self.assertEqual(saved.stat().st_mtime, before)
+        # her gender came from her voice, so the face model has not run; asking for an age runs it,
+        # on the clearest faces of the man only (the one with black hair), who looks about 38
+        self.assertEqual(int(np.load(saved)["faced"].sum()), 0)
+        self.assertEqual(find("old man with black hair", ["duo_purple"]), [])
+        self.assertEqual(int(np.load(saved)["faced"].sum()), state["config"]["look"]["faces_per_person"])
+
+
+class Cheapest(unittest.TestCase):
+    def test_nobody_with_the_colour_means_no_more_work(self):
+        with tempfile.TemporaryDirectory() as out:
+            opts = h.search_options()
+            opts.out = Path(out)
+            s = search.Searcher(opts, state["config"])
+            req = search.parse("woman with green hair talking", state["config"])
+            self.assertEqual(s.search(mf.path("duo_purple"), req, "talking"), [])
+            self.assertEqual(s.note, "nobody looks right: no green hair seen")
+            self.assertEqual(sorted(p.name for p in Path(out).iterdir()), ["appearance", "poses"])   # no faces, sound, camera
+
+    def test_the_quick_look(self):
+        s, req = state["searcher"], search.parse("woman with purple hair talking", state["config"])
+        self.assertTrue(s.scout(mf.path("duo_purple"), req))
+        self.assertFalse(s.scout(mf.path("duo_natural"), req))
+        self.assertIn("no purple hair seen", s.note)
+        self.assertTrue(s.scout(mf.path("duo_natural"), search.parse("man talking", state["config"])))  # no colour: nothing to look for
+
+    def test_anyone_doing_it_is_the_detectors_sections(self):
+        h.run("jumping", ["jump_three"])
+        want = [(float(r["start_s"]), float(r["end_s"])) for r in h.sections("jump_three", "jumping")]
+        rows = find("people jumping", ["jump_three"])
+        self.assertEqual([(r["start_s"], r["end_s"]) for r in rows], want)
+        self.assertTrue(want)
+        self.assertTrue(all(r["best_boxes"] for r in rows))
 
 
 if __name__ == "__main__":

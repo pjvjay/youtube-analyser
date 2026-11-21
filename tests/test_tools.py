@@ -181,7 +181,7 @@ class Service(unittest.TestCase):
         self.assertEqual(status["status"], "done", status)
         self.assertEqual((status["action"], status["looking_for"]), ("talking", "gender female, hair purple"))
         got = list(csv.DictReader(self.call("GET", f"/jobs/{job_id}/matches.csv").decode().splitlines()))
-        searcher = search.Searcher(search.options(h.OUT, keep_intro=True), search.people.load_config())
+        searcher = search.Searcher(h.search_options(), search.people.load_config())
         req = search.parse("woman with purple hair talking", searcher.config)
         want = searcher.search(mf.path("duo_purple"), req, "talking")
         self.assertEqual([(float(r["start_s"]), float(r["end_s"])) for r in got], [(r["start_s"], r["end_s"]) for r in want])

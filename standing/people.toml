@@ -21,6 +21,9 @@ old_above = 55
 # common answer must be at least this share of them.
 min_samples = 2
 min_share = 0.5
+# Apparent gender and age are judged on each person's clearest faces only, up to this many (the
+# face model is the slow part of the search; the median of a few clear faces is as good).
+faces_per_person = 5
 
 [models]
 # models/gender_age.onnx: the age and gender network from yu4u/age-gender-estimation (MIT code,

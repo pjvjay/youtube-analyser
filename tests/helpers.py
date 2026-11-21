@@ -4,10 +4,17 @@ run(action, names) runs standing/detect_standing.py on the clips (once; the dete
 and "done" files make later runs instant), into tests/.cache/v<N>/out. people(name, action) then
 labels everyone in every sample from the same cached inputs, so a test can check each person,
 not just the sections.
+
+DETECTOR_OPTIONS (environment) runs the end-to-end tests with other pose model settings, into a
+cache folder of their own, to see what a faster setting costs:
+    DETECTOR_OPTIONS="--imgsz 320" .venv/bin/python -m unittest tests.test_movement tests.test_talking tests.test_search
 """
 import argparse
 import csv
 import functools
+import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -26,8 +33,9 @@ import make_fixtures as mf  # noqa: E402
 import people as characteristics  # noqa: E402  (standing/people.py; "people" is the helper below)
 import search  # noqa: E402
 
-OUT = mf.CACHE / "out"
-__all__ = ["actions", "audio", "ds", "mf", "characteristics", "search", "REPO", "OUT", "run", "people", "sections", "csv_rows", "out_dir",
+OPTIONS = shlex.split(os.environ.get("DETECTOR_OPTIONS", ""))
+OUT = mf.CACHE / ("out-" + re.sub(r"[^a-z0-9.]+", "-", " ".join(OPTIONS).lower()).strip("-") if OPTIONS else "out")
+__all__ = ["actions", "audio", "ds", "mf", "characteristics", "search", "REPO", "OUT", "OPTIONS", "search_options", "run", "people", "sections", "csv_rows", "out_dir",
            "track_person", "overlap", "in_view", "steady"]
 
 
@@ -36,10 +44,22 @@ def run(action, names, *options):
     done for this action are skipped by the detector itself."""
     clips = [str(mf.build(n)) for n in names]
     r = subprocess.run([sys.executable, str(REPO / "standing" / "detect_standing.py"), *clips, "--out", str(OUT),
-                        "--keep-intro", "--action", action, *options], capture_output=True, text=True)
+                        "--keep-intro", "--action", action, *OPTIONS, *options], capture_output=True, text=True)
     if r.returncode or "FAILED" in r.stderr:
         raise AssertionError(f"detect_standing.py failed:\n{r.stdout[-2000:]}\n{r.stderr[-4000:]}")
     return r
+
+
+def search_options(**over):
+    """search.options() for the tests' cache, with the pose model settings of DETECTOR_OPTIONS."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--model", type=Path, default=ds.DEFAULT_MODEL)
+    ap.add_argument("--fps", type=float, default=1.0)
+    known, _ = ap.parse_known_args(OPTIONS)
+    if not known.model.is_absolute():
+        known.model = REPO / known.model
+    return search.options(OUT, imgsz=known.imgsz, model=known.model, fps=known.fps, keep_intro=True, **over)
 
 
 def out_dir(action):

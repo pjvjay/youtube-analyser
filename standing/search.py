@@ -25,10 +25,12 @@ YouTube link at the start), index.html with a thumbnail of each (the person boxe
 summary.
 """
 import argparse
+import contextlib
 import csv
 import html
 import re
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -175,11 +177,15 @@ def describe_query(req):
 
 # ---- checking a person -----------------------------------------------------------------------
 
-def check(person, req, config, enrolled_req=None):
-    """(verdict, evidence): "match", "possible" or "no", and what decided each part."""
+LOOKS = ("hair", "top", "bottom", "clothes")        # the parts the appearance pass alone decides
+
+
+def check(person, req, config, enrolled_req=None, parts=PARTS):
+    """(verdict, evidence): "match", "possible" or "no", and what decided each part (only these
+    parts: the search checks the looks first, before the slower passes)."""
     look = config["look"]
     verdicts, evidence = [], []
-    for part in PARTS:
+    for part in parts:
         want = req[part]
         if not want:
             continue
@@ -273,6 +279,9 @@ class Searcher:
         self.enrolled = None
         self.unsure = 0   # people left out who might match (--possible)
         self.starts = {}
+        self.label_intros = False   # True: keep results in the intros, marked in_intro (channel.py)
+        self.timings = {}           # seconds spent on each step, added up over the videos searched
+        self.note = ""
         self.bank = bank if bank != "load" else None if args.keep_intro else intro.load_bank(args.intro_bank)
 
     def model(self, name):
@@ -293,16 +302,33 @@ class Searcher:
                                  jump_fps=a.jump_fps, conf=a.conf)
         return ds.load_input(v, poses, sub, self.models)[0]
 
-    def appearance(self, v, poses):
-        (self.args.out / "appearance").mkdir(parents=True, exist_ok=True)
+    def appearance(self, v, poses, looks=True, faces=(), saved=None):
+        """The appearance arrays (appearance/<video>.npz), measuring what is asked for and not
+        yet measured: looks (hair and clothes of everyone) and faces (detections to judge for
+        gender and age)."""
+        path = self.args.out / "appearance" / f"{v.stem}.npz"
+        if saved is None:
+            saved = dict(np.load(path)) if path.exists() else None
+            if saved is None or int(saved["version"]) != people.APPEARANCE_VERSION \
+                    or int(saved["poses_n"]) != len(poses["frame"]):
+                saved = people.empty(poses)
+        todo_faces = [j for j in faces if not saved["faced"][j]] if self.config["models"]["gender_age"] else []
+        if not (looks and not int(saved["looked"])) and not todo_faces:
+            return saved
         w, h = (int(x) for x in poses["size"])
-        gender_age = self.config["models"]["gender_age"]
-        return ds.cached(self.args.out / "appearance" / f"{v.stem}.npz",
-                         lambda d: int(d["version"]) == people.APPEARANCE_VERSION and int(d["poses_n"]) == len(poses["frame"])
-                         and (not gender_age or not np.isnan(d["female"]).all() or np.isnan(d["eyes"]).all()
-                              or np.nanmax(d["eyes"]) < self.config["look"]["gender_min_eyes"]),
-                         lambda: people.describe(ds.read_frames(v, float(poses["fps"]), w, h), poses,
-                                                 self.model("appearance"), self.config))[0]
+        out = people.describe(ds.read_frames(v, float(poses["fps"]), w, h), poses, self.model("appearance"),
+                              self.config, saved, looks, todo_faces)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ds.save_npz(path, out)
+        return out
+
+    @contextlib.contextmanager
+    def timed(self, step):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.timings[step] = self.timings.get(step, 0.0) + time.perf_counter() - t0
 
     def enrol(self):
         """{name: (voice fingerprint, pitch)} of the people in the config with a voice sample."""
@@ -330,36 +356,58 @@ class Searcher:
 
     def search(self, v, req, action):
         """Results for one video: [row dict], each with best_t, best_j (the 1-fps detection) and
-        best_box for the thumbnail."""
+        best_box for the thumbnail. self.note says why there were none.
+
+        The work is done cheapest first, and stops as soon as nobody can match: the pose model;
+        then hair and clothes colours, if asked for (nobody with purple hair: done); then
+        following people and checking their looks; then their voices, if needed; then the face
+        model for gender and age, on each remaining person's few clearest faces; then the action.
+        Without a description ("anyone jumping"), the detector's own sections are the results."""
         a, cfg = self.args, self.config
-        poses, _ = ds.load_poses(v, a, self.models["pose"])
+        self.note = ""
+        with self.timed("pose model"):
+            poses, _ = ds.load_poses(v, a, self.models["pose"])
         if not len(poses["frame"]):
+            self.note = "nobody in view"
             return []
-        look = self.appearance(v, poses)
-        camera = ds.load_camera(v, poses, a)
-        track = people.tracks(poses, camera, camera["look"])
-        own, voices = {}, None
-        needs_voice = bool(req["voice"] or req["name"] or req["gender"]) or action in ds.SOUND_ACTIONS
-        if needs_voice:
-            extra = self.inputs(v, poses, "talking")
-            _, heard = ds.label_people(poses, "talking", extra)
-            for frame in heard:
-                for p in frame:
-                    voice = p["m"].get("voice", "")
-                    if p["state"] == "talking" and len(voice) == 1:
-                        own[p["j"]] = ord(voice) - ord("A")
-            sound = extra["audio"]
-            if sound is not None and "voice_f0" in sound:
-                names = people.name_voices(sound["voice_centroid"], sound["voice_f0"], self.enrol(), cfg)
-                voices = {"f0": sound["voice_f0"], "names": names}
-        persons = people.summarise(poses, track, look, cfg, own, voices)
+        if not any(req[k] for k in PARTS):
+            return self.anyone(v, poses, action)
         enrolled_req = None
         if req["name"]:
             described = next((p.get("describe") for p in cfg.get("people", []) if p["name"] == req["name"]), None)
             enrolled_req = parse(described, cfg) if described else None
+        either = [r for r in (req, enrolled_req) if r]
+        looks = any(r[k] for r in either for k in LOOKS)
+        faces = any(r[k] for r in either for k in ("gender", "age"))
+        with self.timed("hair and clothes"):
+            look = self.appearance(v, poses, looks=looks)
+        if not a.possible and not req["name"] and not self.could_match(look, req):
+            self.note = "nobody looks right: " + self.note
+            return []
+        with self.timed("camera"):
+            camera = ds.load_camera(v, poses, a)
+        track = people.tracks(poses, camera, camera["look"], look["hair"])
+        persons = people.summarise(poses, track, look, cfg)
+        first = [p for p in LOOKS if req[p]]
+        alive = {tr for tr, p in persons.items() if check(p, req, cfg, parts=first)[0] != "no"}
+        if not alive:
+            self.note = "nobody looks right"
+            return []
+        own, voices = {}, None
+        if bool(req["voice"] or req["name"] or req["gender"]) or action in ds.SOUND_ACTIONS:
+            with self.timed("faces and voices"):
+                own, voices = self.voices(v, poses)
+            persons = people.summarise(poses, track, look, cfg, own, voices)
+            heard = lambda tr: [p for p in ("voice",) if req[p]] + (["gender"] if req["gender"] and persons[tr]["gender_by"] == "voice" else [])
+            alive = {tr for tr in alive if check(persons[tr], req, cfg, parts=heard(tr))[0] != "no"}
+        if faces and alive:
+            undecided = [tr for tr in alive if persons[tr]["gender_by"] != "voice" or any(r["age"] for r in either)]
+            with self.timed("gender and age"):
+                look = self.appearance(v, poses, looks=looks, faces=people.face_picks(look, track, undecided, cfg), saved=look)
+            persons = people.summarise(poses, track, look, cfg, own, voices)
         wanted = {}
         for tr, person in persons.items():
-            verdict, why = check(person, req, cfg, enrolled_req)
+            verdict, why = check(person, req, cfg, enrolled_req) if tr in alive else ("no", "ruled out by their looks")
             if a.explain:
                 print(f"  {v.name} person {tr}: {describe_person(person, cfg)} -> {verdict}: {why}", flush=True)
             if verdict == "match" or (verdict == "possible" and a.possible):
@@ -367,9 +415,105 @@ class Searcher:
             elif verdict == "possible":
                 self.unsure += 1
         if not wanted:
+            self.note = "nobody matches"
             return []
-        timeline, states = self.states(v, poses, track, action)
-        return self.sections(v, poses, timeline, states, wanted, action)
+        with self.timed(action or "visible"):
+            timeline, states = self.states(v, poses, track, action)
+        rows = self.sections(v, poses, timeline, states, wanted, action)
+        if not rows:
+            self.note = f"found, but not {action}"
+        return rows
+
+    def scout(self, v, req):
+        """A quick look before the full search: the pose model and the hair and clothes colours
+        on the video's keyframes only (see keyframes()). False when nobody there has the colours
+        asked for (self.note says which); True when someone might, or when the query names no
+        colours (nothing to look for)."""
+        if not any(req[k] for k in LOOKS):
+            return True
+        w, h = ds.probe(v)
+        with self.timed("quick look"):
+            return self._scout(v, req, w, h)
+
+    def _scout(self, v, req, w, h):
+        frames = list(keyframes(v, w, h))
+        n = len(frames)
+        confs, boxes, kps, frame = [], [], [], []
+        for i, (c, b, k) in enumerate(self.model("pose").run((img for _, img in frames), self.args.conf)):
+            frame += [i] * len(c)
+            confs.append(c)
+            boxes.append(b)
+            kps.append(k)
+        cat = lambda xs, shape: np.concatenate(xs) if xs else np.zeros(shape, np.float32)
+        poses = {"t": np.arange(n, dtype=np.float32), "frame": np.array(frame, np.int32), "conf": cat(confs, (0,)),
+                 "box": cat(boxes, (0, 4)), "kp": cat(kps, (0, 17, 3)), "size": np.array([w, h]), "fps": np.float32(1)}
+        if not len(poses["frame"]):
+            self.note = f"quick look: nobody in {n} keyframes"
+            return False
+        look = people.describe(iter(frames), poses, self.model("appearance"), self.config, looks=True)
+        if self.could_match(look, req):
+            return True
+        self.note = f"quick look ({n} keyframes): {self.note}"
+        return False
+
+    def could_match(self, look, req):
+        """Whether anyone in the video could have the hair and clothes colours asked for: each
+        colour must be the name of at least one detection's (a person's colour is the most
+        common of theirs). Sets self.note to what was missing."""
+        palettes = self.config["colours"]
+        names = {}
+        for part, palette in (("hair", "hair"), ("top", "clothes"), ("bottom", "clothes")):
+            names[part] = {people.colour_name(x, palettes[palette])[0] for x in look[part] if not np.isnan(x).any()}
+        names["clothes"] = names["top"] | names["bottom"]
+        for part in LOOKS:
+            if req[part] and not (req[part] & names[part]):
+                self.note = f"no {'/'.join(sorted(req[part]))} {part} seen"
+                return False
+        return True
+
+    def voices(self, v, poses):
+        """({detection: its own voice}, {"f0", "names"}) from the talking rules and the sound."""
+        own, voices = {}, None
+        extra = self.inputs(v, poses, "talking")
+        _, heard = ds.label_people(poses, "talking", extra)
+        for frame in heard:
+            for p in frame:
+                voice = p["m"].get("voice", "")
+                if p["state"] == "talking" and len(voice) == 1:
+                    own[p["j"]] = ord(voice) - ord("A")
+        sound = extra["audio"]
+        if sound is not None and "voice_f0" in sound:
+            names = people.name_voices(sound["voice_centroid"], sound["voice_f0"], self.enrol(), self.config)
+            voices = {"f0": sound["voice_f0"], "names": names}
+        return own, voices
+
+    def anyone(self, v, poses, action):
+        """Anyone doing the action: the detector's own sections (as detect_standing.py finds them,
+        still figures dropped), one row each with everyone doing it boxed."""
+        if action in (None, "visible"):
+            raise ValueError("a search needs a person or an action")
+        with self.timed(action):
+            extra = self.inputs(v, poses, action)
+        rules = ds.ACTIONS[action]
+        _, sections, in_intro, _ = ds.detect(v, poses, action, rules["min_frames"], rules["max_gap"],
+                                             self.interview_start(v), extra)
+        for s in in_intro:
+            s["in_intro"] = True
+        m = ds.NAME_RE.match(v.stem)
+        url = f"https://www.youtube.com/watch?v={m.group(2)}" if m else ""
+        rows = []
+        for s in sorted((in_intro if self.label_intros else []) + sections, key=lambda s: s["start_s"]):
+            boxes = [p["box"] for p in s["best_people"] if p["state"] == action]
+            n = s[f"max_people_{action}"]
+            rows.append({"video": v.name, "person": "", "start_s": s["start_s"], "end_s": s["end_s"], "start": s["start"],
+                         "end": s["end"], "duration_s": s["duration_s"], "action": action, "match": "match",
+                         "evidence": f"{n} {'person' if n == 1 else 'people'} {action}", "youtube":
+                         f"{url}&t={int(s['start_s'])}s" if url else "", "best_t": s["best_t"], "best_j": None,
+                         "best_box": [float(x) for x in max(boxes, key=lambda b: float(b[2] * b[3]))],
+                         "best_boxes": [[float(x) for x in b] for b in boxes], "in_intro": s.get("in_intro", False)})
+        if not rows:
+            self.note = f"nobody {action}"
+        return rows
 
     def states(self, v, poses, track, action):
         """(timeline, [(t, track, detection, doing it, box)] for every sample of a tracked person;
@@ -404,11 +548,12 @@ class Searcher:
         rules = ds.ACTIONS.get(action, {"min_frames": 1, "max_gap": 2}) if action not in (None, "visible") else {"min_frames": 1, "max_gap": 2}
         fps = float(timeline["fps"])
         start = self.interview_start(v)
+        since = 0 if self.label_intros else start
         m = ds.NAME_RE.match(v.stem)
         url = f"https://www.youtube.com/watch?v={m.group(2)}" if m else ""
         rows = []
         for tr, (verdict, why) in wanted.items():
-            times = sorted(((t, j, box) for t, k, j, doing, box in states if k == tr and doing and t >= start),
+            times = sorted(((t, j, box) for t, k, j, doing, box in states if k == tr and doing and t >= since),
                            key=lambda x: x[0])
             cur = None
             for t, j, box in times:
@@ -428,8 +573,8 @@ class Searcher:
                         "start": ds.hms(s["first"]), "end": ds.hms(end), "duration_s": round(end - s["first"], 1),
                         "action": action or "visible", "match": verdict, "evidence": why,
                         "youtube": f"{url}&t={int(s['first'])}s" if url else "", "best_t": best_t, "best_j": best_j,
-                        "best_box": [float(x) for x in best_box]})
-        return out
+                        "best_box": [float(x) for x in best_box], "in_intro": bool(s["first"] < start)})
+        return sorted(out, key=lambda r: (r["start_s"], str(r["person"])))
 
 
 # ---- output ----------------------------------------------------------------------------------
@@ -440,17 +585,9 @@ def slug(text):
 
 def write(rows, query, req, videos, out_dir):
     """matches.csv, index.html and thumbnails (the person boxed) in out_dir."""
-    (out_dir / "thumbs").mkdir(parents=True, exist_ok=True)
     by_name = {v.name: v for v in videos}
     for r in rows:
-        v = by_name[r["video"]]
-        w, h = ds.probe(v)
-        img = _frame_at(v, r["best_t"], w, h)
-        x, y, bw, bh = r["best_box"]
-        big = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        cv2.rectangle(big, (int(3 * x), int(3 * y)), (int(3 * (x + bw)), int(3 * (y + bh))), (60, 200, 60), 2)
-        r["thumb"] = f"{v.stem}_{int(r['start_s']):05d}_{r['person']}.jpg"
-        cv2.imwrite(str(out_dir / "thumbs" / r["thumb"]), big)
+        r["thumb"] = thumbnail(by_name[r["video"]], r, out_dir / "thumbs")
     with open(out_dir / "matches.csv", "w", newline="") as f:
         wr = csv.DictWriter(f, FIELDS, extrasaction="ignore", lineterminator="\n")
         wr.writeheader()
@@ -468,6 +605,32 @@ def write(rows, query, req, videos, out_dir):
         "figure{margin:0}img{width:100%;border-radius:4px}</style>"
         f"<h1>{html.escape(query)}</h1><p>Looking for: {html.escape(describe_query(req))}; action: "
         f"{html.escape(req['action'] or 'any (in view)')}. {len(rows)} results.</p>{ignored}<main>{cards}</main>")
+
+
+def thumbnail(v, r, folder):
+    """Save a result's thumbnail (its best sample, 3x enlarged, the person boxed) in folder;
+    returns its file name."""
+    folder.mkdir(parents=True, exist_ok=True)
+    w, h = ds.probe(v)
+    big = cv2.resize(_frame_at(v, r["best_t"], w, h), None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    for x, y, bw, bh in r.get("best_boxes") or [r["best_box"]]:
+        cv2.rectangle(big, (int(3 * x), int(3 * y)), (int(3 * (x + bw)), int(3 * (y + bh))), (60, 200, 60), 2)
+    name = f"{v.stem}_{int(r['start_s']):05d}_{r['person']}.jpg"
+    cv2.imwrite(str(folder / name), big)
+    return name
+
+
+SCOUT_EVERY_S = 4   # the quick look takes at most one keyframe every 4 s
+
+
+def keyframes(path, w, h):
+    """Yield (index, BGR) for the video's keyframes, at most one every SCOUT_EVERY_S. Only the
+    keyframes are read and decoded (YouTube's come every few seconds): on the 27-minute test
+    video, 1.8 s against 10 s for decoding every frame as read_frames() must (and 19 s with
+    -skip_frame, which still hands every frame to the decoder)."""
+    yield from ds._decode(["ffmpeg", "-v", "error", "-discard", "nokey", "-i", str(path), "-an", "-vf",
+                           f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{SCOUT_EVERY_S})'",
+                           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], 1.0, w, h)
 
 
 def _frame_at(v, t, w, h):
@@ -488,6 +651,8 @@ def main():
     ap.add_argument("--possible", action="store_true", help="also list people who might match (some part not seen)")
     ap.add_argument("--keep-intro", action="store_true", help="search the intros too")
     ap.add_argument("--explain", action="store_true", help="print what was seen of every person and why they matched or not")
+    ap.add_argument("--quick", action="store_true", help="with a colour in the query, look at each video's keyframes first "
+                    "and skip the video if nobody there has it (can miss someone on screen for under about 10 s)")
     ap.add_argument("--intro-bank", type=Path, default=intro.DEFAULT_BANK)
     ap.add_argument("--model", type=Path, default=ds.DEFAULT_MODEL)
     ap.add_argument("--imgsz", type=int, default=640)
@@ -512,12 +677,13 @@ def main():
     rows = []
     for i, v in enumerate(args.videos, 1):
         try:
-            found = searcher.search(v, req, action)
+            found = searcher.search(v, req, action) if not args.quick or searcher.scout(v, req) else []
         except Exception as e:  # a bad file should not stop the search
             print(f"[{i}/{len(args.videos)}] {v.name}: FAILED {e}", file=sys.stderr, flush=True)
             continue
         rows += found
-        print(f"[{i}/{len(args.videos)}] {v.name}: {len(found)} results", flush=True)
+        print(f"[{i}/{len(args.videos)}] {v.name}: {len(found)} results"
+              + (f" ({searcher.note})" if searcher.note and not found else ""), flush=True)
     rows.sort(key=lambda r: (r["match"] != "match", r["video"], r["start_s"]))
     out_dir = args.results / slug(args.query if not args.action or args.action in args.query.lower()
                                   else f"{args.query} {args.action}")

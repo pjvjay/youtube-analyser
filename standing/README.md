@@ -307,7 +307,9 @@ results on either (faces to within 2e-6, voices identically). No new Python pack
 ```
 
 The query describes a person and, optionally, an action (any of the `--action`s above; without
-one, every time the person is in view). It can use:
+one, every time the person is in view). An action alone ("people jumping", "anyone talking")
+finds everyone doing it: the detector's own sections, as `detect_standing.py --action` gives
+them. The description can use:
 
 - **hair colour**: black, brown, blond, red, grey, white, purple, pink, blue, green (and words
   like blonde, brunette, redhead, ginger, violet, silver, dark, light);
@@ -323,27 +325,34 @@ gender female, hair purple; action: talking`). The words, colours and thresholds
 needed). `--explain` prints what was seen of every person and why they matched or not.
 
 **How it works.** It reuses everything `detect_standing.py` saved in `--out` (the pose model's
-output, faces, sound, camera movement; whatever is missing is computed and saved) and adds one
-pass over the 1-fps samples (`appearance/<video>.npz`), so searching again, for anyone, is quick:
+output, faces, sound, camera movement; whatever is missing is computed and saved) and adds what
+it measures itself (`appearance/<video>.npz`), so searching again, for anyone, is quick. The
+steps go cheapest first, and a video is done as soon as nobody in it can match:
 
-1. **Each person's looks in each sample** (`people.py`). Hair: the person's pixels
+1. **The pose model**, as for every action.
+2. **Hair and clothes colours**, if the query names any (`people.py`). Hair: the person's pixels
    (`models/person_mask.onnx`) around the head, minus the face (its outline from the face landmark
    model) and minus anything the colour of their cheeks; only on faces with at least 10 px between
    the eyes. Top and bottom: the person's pixels between shoulders and hips, and hips and knees.
-   Each colour is named by the nearest example in the palette (people.toml). Apparent gender and
-   age (`models/gender_age.onnx`) on faces with at least 12 px between the eyes.
-2. **People are followed through each shot**, linked from sample to sample as the walking rules
+   Each colour is named by the nearest example in the palette (people.toml). If no sample of
+   anyone has the colour asked for, nobody can match: done.
+3. **People are followed through each shot**, linked from sample to sample as the walking rules
    link them (position after the camera's own movement, size, clothes), or by their box in
-   close-ups; never across a cut. Every characteristic is then voted over all of a person's
-   samples (at least 2, and the winner at least half of them), so one bad sample does not decide.
-3. **Their voice.** For gender, voice or a name, the talking rules (above) find which voice is
+   close-ups; never across a cut, and not between two different hair colours (a cut the camera
+   measurement missed). Every characteristic is then voted over all of a person's samples (at
+   least 2, and the winner at least half of them), so one bad sample does not decide. People
+   whose colours do not match are dropped.
+4. **Their voice**, for gender, voice or a name: the talking rules (above) find which voice is
    each face's own. The voice's pitch gives "deep" (≤ 140 Hz) or "high" (≥ 155 Hz), and it
    decides apparent gender before the face does, because at 144p it is the more reliable of the
    two (below).
-4. **Each person is checked** against every part of the query: yes, no, or not seen well enough.
+5. **Apparent gender and age from the face** (`models/gender_age.onnx`, the slowest model), only
+   for the people still in the running whose voice did not decide, and only on each one's 5
+   clearest faces with at least 12 px between the eyes (`faces_per_person`).
+6. **Each person is checked** against every part of the query: yes, no, or not seen well enough.
    Everyone with all yes is a **match**; with `--possible`, people with no "no" but something unseen
    are listed too, as **possible** (without it, the summary says how many there were).
-5. **Their action** comes from the same rules as `--action` (talking, walking, ...), per person, and
+7. **Their action** comes from the same rules as `--action` (talking, walking, ...), per person, and
    times they do it are joined into sections (as for the detector: gaps of up to 2 samples,
    intros left out unless `--keep-intro`).
 
@@ -385,9 +394,103 @@ results.
 Gender here is the apparent gender of a face or voice, as these models estimate it, not anyone's
 identity; the words a query can use for it are in `people.toml`.
 
-Speed: the appearance pass took about 40 ms per person per sample on the 4-core test machine
-(so a few minutes per hour of a two-person interview); gender, voice and name also need the
-talking inputs (face and sound passes, shared with `--action talking`).
+Speed: see [the channel search](#searching-a-whole-channel-channelpy) below, which measured each
+step. Gender, voice and name need the talking inputs (the face and sound passes, shared with
+`--action talking`), which are the slowest part when someone might match.
+
+## Searching a whole channel (`channel.py`)
+
+One command from a channel's address to a report of every moment found, with a link to each on
+YouTube:
+
+```bash
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "people jumping"
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "woman with purple hair talking"
+.venv/bin/python standing/channel.py "https://www.youtube.com/@SomeShow" "man in a blue coat walking" --max-videos 50
+.venv/bin/python standing/channel.py ./my_videos "someone smiling"             # videos you already have
+```
+
+The query is `search.py`'s: an action alone finds **everyone doing it** (the detector's sections);
+a description, with or without an action, finds **that person doing it**. It prints what it
+understood before it starts (`looking for: gender female, hair purple; action: talking`).
+
+**What it does**
+
+1. Lists the channel's videos with yt-dlp (its Videos tab, newest first; `--shorts` adds the
+   Shorts). A playlist or a single video's address works too.
+2. Downloads them at the lowest resolution, 144p (the format the original 248 videos were
+   downloaded in), **without the sound when the query does not need it** (talking, silent, a
+   voice, gender and names do), 3 at a time (`--downloads`) and ahead of the analysis (up to 6
+   waiting, `--ahead`), so downloading and analysing overlap. Each is named `YYYYMMDD_<id>` and
+   listed in `videos.csv` (upload date, title, duration) for the links and the report.
+3. Finds each episode's intro (title sequence, teaser) as `intro.py` does, from the title footage
+   the first 8 long videos share (`intro_bank.npz`): results there are kept, but listed apart at
+   the end of the report. `--intros keep` treats every video as a whole.
+4. Searches each video (`search.py`, cheapest first). **With a colour in the query, a quick look
+   comes first**: the pose model and the colours on the video's keyframes only (decoding only
+   keyframes takes 2 s for a 27-minute video, against 10 s for every frame), at most one every
+   4 s. A video where nobody has the colour is done there; otherwise it is searched in full.
+5. Rewrites the report after every video, so it can be opened while the run goes on.
+
+**Output**, in `channels/<channel>/searches/<query>/`: `report.html` (thumbnails with the person
+boxed, grouped by video, newest first; each links to its moment on YouTube), `report.md` (the
+same as a list of links), `matches.csv` (upload date, title, video ID, start, end, action,
+match, whether it is in the intro, the evidence, the link) and `thumbs/`. The work folder
+(`--work`, default `channels/<channel>/`) also keeps the videos, `videos.csv` and the model
+output (`output/`), so an interrupted run carries on where it stopped (videos already searched
+are skipped), and a second query on the same channel reuses the videos and everything already
+computed. `--delete-videos` deletes each video once searched (a later query that needs something
+new downloads it again). Everything in `channels/` names the videos, so it is not committed.
+
+**Speed** (`--speed`):
+
+| Setting | What it does | |
+|---|---|---|
+| `quick` (default) | The quick look first, for queries with a colour | Can miss someone who is on screen for under about 10 s |
+| `thorough` | Every second of every video | The tested settings, throughout |
+| `fastest` | `quick`, and the pose model at input size 320 instead of 640 (about 4x faster) | Passed the same end-to-end tests (movement, talking, search) as 640; finds fewer small, distant people. Its model output is kept apart (`output-320/`) |
+
+Measured on a 27-minute test video (two or three people in close-ups nearly all the time, so
+faces and voices are everywhere), on the 4-core sandbox used for development, whose speed varied
+by up to 2x from run to run:
+
+| Query | Speed | Time | Real time |
+|---|---|---|---|
+| "woman with green hair talking" (nobody has green hair) | quick | 14 s (33 s for the first video of a run, which also loads the models) | 115x |
+| | fastest | 7 s (21 s for the first) | 230x |
+| | thorough | 162 s | 10x |
+| "woman with purple hair talking" (she is there: 16 results) | quick | 320-410 s (two runs) | 4-5x |
+| | fastest | 220-270 s (two runs) | 6-7x |
+| | thorough | 412 s | 4x |
+| "people jumping" (nobody jumps; no whole bodies in view) | quick | 104 s | 16x |
+| "people talking" (53 results) | quick | 377 s | 4x |
+
+Before these changes a person search ran every step on every video, with the gender model on
+every face: about 390 s for this video (measured when the same machine ran the pose model in 91 s
+rather than the 115-125 s of these runs). So a search for someone who is in few of the videos,
+which is what a search usually is, is now about 30x faster (`quick`) to 60x (`fastest`); in the
+videos where they might be, it is 1-1.5x faster, and the face and sound passes for talking (about
+a third of the time) and the pose model are most of it. Downloading at 144p (about 30 MB an hour
+of video, less without the sound) happens alongside the analysis, and should rarely hold it up.
+
+**More machines.** One run uses every core of its machine. `--shard K/N` searches every Nth video,
+starting with the Kth, so N runs share a channel: on a machine with many cores (each with
+`--threads`), or on several machines sharing the work folder; each run's report shows every
+run's results.
+
+**Options:** `--max-videos N` (the newest N), `--since` / `--until YYYYMMDD` (upload dates),
+`--shorts`, `--action` (instead of one in the query), `--config` (your people.toml),
+`--possible`, `--explain`, `--cookies cookies.txt` or `--cookies-from-browser firefox` (if
+YouTube asks you to sign in), `--yt-dlp-arg "--sleep-requests 1"` (any yt-dlp option, e.g. to go
+slower if YouTube limits you), `--yt-dlp` (the yt-dlp command), `--runtime`, `--threads`.
+
+**yt-dlp** is not pinned with the other packages, because YouTube changes often and only a
+recent yt-dlp keeps up: install or update it with `.venv/bin/pip install -U yt-dlp` (or use one
+on your PATH). If it reports that YouTube needs a JavaScript runtime or a sign-in, follow its
+message (its wiki covers both). This tool was tested with a stand-in for yt-dlp
+(`tests/fake_yt_dlp.py`), not against YouTube itself, which the development machine could not
+reach; the download format is the one used for the original videos. Download only what you are
+allowed to.
 
 ## Where the interview starts (`intro.py`)
 
@@ -523,7 +626,8 @@ last PyTorch release for Intel Macs). The Ultralytics models and weights are lic
 
 ## Tests
 
-`tests/` has 126 tests: the decision rules on made-up measurements (seconds), standing compared
+`tests/` has 137 tests: the decision rules on made-up measurements (seconds), standing compared
 with the original code, walking, running, jumping and up to three people talking end to end
-on made clips whose truth is known, and the search for people by their looks, voice and name. See [`../tests/README.md`](../tests/README.md), and
+on made clips whose truth is known, the search for people by their looks, voice and name, and
+whole-channel searches (`channel.py`) through a stand-in for yt-dlp. See [`../tests/README.md`](../tests/README.md), and
 [`../docs/running.md`](../docs/running.md) for running everything step by step.

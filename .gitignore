@@ -49,6 +49,7 @@ standing/*/*/review*.csv
 # manual review, detector output, the title-frame bank). samples/ shows the formats with made-up names.
 /analysis/
 /results/
+/channels/
 /standing/output/
 /standing/models/intro_bank.npz
 /archive.txt

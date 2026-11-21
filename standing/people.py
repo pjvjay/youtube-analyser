@@ -36,13 +36,16 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "people.toml"
 PERSON_MASK_MODEL = HERE / "models" / "person_mask.onnx"
 GENDER_AGE_MODEL = HERE / "models" / "gender_age.onnx"
-APPEARANCE_VERSION = 1
+APPEARANCE_VERSION = 2
 
 # MediaPipe face mesh: the face outline, from the top of the forehead round to the chin (index 18).
 FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152,
              148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
 CHIN = 18                          # position of landmark 152 in FACE_OVAL
 TRACK_IOU = 0.3                    # a person's box overlaps their box in the next sample at least this much
+HAIR_LINK_MAX = 30                 # hair colours further apart than this are two people (on the test clips,
+                                   # dyed purple against natural brown: 51; one person's consecutive samples:
+                                   # at most 4, from a still portrait; real heads and light vary more)
 MIN_PX = 8                         # pixels needed to measure a colour
 
 
@@ -124,34 +127,73 @@ class AppearanceModels:
 
 # ---- what each detection looks like ----------------------------------------------------------
 
-def describe(frames, poses, models, config):
-    """Hair, clothes, apparent gender and age of every pose detection (arrays for
-    appearance/<video>.npz). frames: (seconds, BGR) at the poses' samples (read_frames)."""
-    look = config["look"]
+def empty(poses):
+    """Appearance arrays (appearance/<video>.npz) with nothing measured yet: hair, top and bottom
+    colours (CIELAB), female and age NaN; eyes (px between them, NaN: no face turned to the camera)
+    from the poses; looked: whether hair and clothes have been measured; faced: which detections'
+    faces have been judged for gender and age."""
     n = len(poses["frame"])
     out = {k: np.full((n, 3), np.nan, np.float32) for k in ("hair", "top", "bottom")}
-    out.update({k: np.full(n, np.nan, np.float32) for k in ("female", "age", "eyes")})
+    out.update({k: np.full(n, np.nan, np.float32) for k in ("female", "age")})
+    geos = [actions.face_geometry(kp) for kp in poses["kp"]]
+    out["eyes"] = np.array([np.nan if g is None else g[1] for g in geos], np.float32).reshape(n)
+    out.update(looked=np.int32(0), faced=np.zeros(n, bool), poses_n=np.int32(n), version=np.int32(APPEARANCE_VERSION))
+    return out
+
+
+def describe(frames, poses, models, config, out=None, looks=True, faces=()):
+    """Measure what is asked for, adding to out (empty(poses) when None), and return it.
+
+    looks: hair and clothes colours of every detection (once per video); faces: the detections
+    whose apparent gender and age to judge (only faces with gender_min_eyes px between the eyes;
+    search.py asks for a few per person). frames: (seconds, BGR) at the poses' samples
+    (read_frames); only the frames needed are looked at."""
+    look = config["look"]
+    out = empty(poses) if out is None else {k: np.array(v) for k, v in out.items()}
+    looks = looks and not int(out["looked"])
+    faces = {int(j) for j in faces if not out["faced"][j]} if models.gender_age is not None else set()
     by_frame = {}
     for j, f in enumerate(poses["frame"]):
-        by_frame.setdefault(int(f), []).append(j)
+        if looks or j in faces:
+            by_frame.setdefault(int(f), []).append(j)
+    if not by_frame:
+        return out
+    last = max(by_frame)
     for f, (_, img) in enumerate(frames):
+        if f > last:
+            break
         if f not in by_frame:
             continue
-        mask = models.person_mask(img)
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+        if looks:
+            mask = models.person_mask(img)
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
         for j in by_frame[f]:
             kp, box = poses["kp"][j], poses["box"][j]
-            out["top"][j], out["bottom"][j] = _clothes(lab, mask, kp, box)
             geo = actions.face_geometry(kp)
-            if geo is None:
-                continue
-            out["eyes"][j] = geo[1]
-            if geo[1] >= look["hair_min_eyes"]:
-                out["hair"][j] = _hair(img, lab, mask, box, geo, models)
-            if models.gender_age is not None and geo[1] >= look["gender_min_eyes"]:
-                out["female"][j], out["age"][j] = models.female_age(img, geo)
-    out.update(poses_n=np.int32(n), version=np.int32(APPEARANCE_VERSION))
+            if looks:
+                out["top"][j], out["bottom"][j] = _clothes(lab, mask, kp, box)
+                if geo is not None and geo[1] >= look["hair_min_eyes"]:
+                    out["hair"][j] = _hair(img, lab, mask, box, geo, models)
+            if j in faces:
+                out["faced"][j] = True
+                if geo is not None and geo[1] >= look["gender_min_eyes"]:
+                    out["female"][j], out["age"][j] = models.female_age(img, geo)
+    if looks:
+        out["looked"] = np.int32(1)
     return out
+
+
+def face_picks(appearance, track, tracks_wanted, config):
+    """The detections to judge gender and age on for these tracks: each track's faces_per_person
+    largest faces with at least gender_min_eyes px between the eyes (the clearest, and enough
+    for a median)."""
+    look = config["look"]
+    eyes = appearance["eyes"]
+    picks = []
+    for tr in tracks_wanted:
+        js = np.flatnonzero((track == tr) & (eyes >= look["gender_min_eyes"]))
+        picks += js[np.argsort(-eyes[js], kind="stable")][:look["faces_per_person"]].tolist()
+    return picks
 
 
 def _median(lab, where):
@@ -160,19 +202,31 @@ def _median(lab, where):
 
 
 def _hair(img, lab, mask, box, geo, models):
-    """Median colour of the hair: person pixels around the head, not the face, not skin-coloured."""
+    """Median colour of the hair: person pixels around the head, not the face, not skin-coloured.
+    (Worked out in a crop around the head, which gives the same pixels as the whole picture.)"""
     mid, d, _ = geo
     oval, score = models.face_outline(img, geo)
     if score < actions.FACE_SCORE:
         return np.full(3, np.nan, np.float32)
     h, w = mask.shape
-    face = np.zeros((h, w), np.uint8)
-    cv2.fillPoly(face, [np.round(oval).astype(np.int32)], 1)
-    face = cv2.dilate(face, np.ones((3, 3), np.uint8), iterations=max(1, int(d / 10))) > 0
+    grow = max(1, int(d / 10))
     x0, x1 = oval[:, 0].min(), oval[:, 0].max()
     fw = x1 - x0
-    yy, xx = np.mgrid[0:h, 0:w]
-    zone = (xx > x0 - 0.45 * fw) & (xx < x1 + 0.45 * fw) & (yy >= max(box[1], oval[0][1] - 0.9 * fw)) & (yy < oval[CHIN][1])
+    zx0, zx1 = x0 - 0.45 * fw, x1 + 0.45 * fw
+    zy0, zy1 = max(box[1], oval[0][1] - 0.9 * fw), oval[CHIN][1]
+    # the crop: the zone and the (grown) face outline, with a pixel to spare
+    cx0 = int(max(0, math.floor(min(zx0, oval[:, 0].min())) - grow - 1))
+    cx1 = int(min(w, math.ceil(max(zx1, oval[:, 0].max())) + grow + 2))
+    cy0 = int(max(0, math.floor(min(zy0, oval[:, 1].min())) - grow - 1))
+    cy1 = int(min(h, math.ceil(max(zy1, oval[:, 1].max())) + grow + 2))
+    if cx1 <= cx0 or cy1 <= cy0:
+        return np.full(3, np.nan, np.float32)
+    lab, mask = lab[cy0:cy1, cx0:cx1], mask[cy0:cy1, cx0:cx1]
+    face = np.zeros(mask.shape, np.uint8)
+    cv2.fillPoly(face, [np.round(oval).astype(np.int32) - np.array([cx0, cy0], np.int32)], 1)
+    face = cv2.dilate(face, np.ones((3, 3), np.uint8), iterations=grow) > 0
+    yy, xx = np.mgrid[cy0:cy1, cx0:cx1]
+    zone = (xx > zx0) & (xx < zx1) & (yy >= zy0) & (yy < zy1)
     cheeks = lab[face & (yy > mid[1] + 0.3 * d) & (yy < mid[1] + 1.0 * d)]
     hair = zone & ~face & mask
     if len(cheeks):  # forehead and neck skin that the outline missed
@@ -214,13 +268,15 @@ def _clothes(lab, mask, kp, box):
 
 # ---- following people through a shot ---------------------------------------------------------
 
-def tracks(poses, camera=None, looks=None):
+def tracks(poses, camera=None, looks=None, hair=None):
     """A track number for every pose detection: the same person in the sample before (or the one
     before that), in the same shot. As for walking (actions.label_motion): where the camera alone
     would have put them, their mid-hip has moved at most LINK_MAX torso lengths a second and their
     torso is about the same size; people not seen down to the hips (close-ups) by their box instead,
     overlapping by TRACK_IOU or more; and in both cases their clothes alike (looks, as in
-    actions.LOOK_MAX). The nearest pairs are linked first."""
+    actions.LOOK_MAX) and, where both were measured, their hair colour too (hair: CIELAB per
+    detection, within HAIR_LINK_MAX): two people can sit in the same place in two shots that
+    the camera measurement did not see as a cut. The nearest pairs are linked first."""
     w, h = (int(x) for x in poses["size"])
     centre = np.array([w / 2, h / 2])
     by_frame = [[] for _ in poses["t"]]
@@ -229,6 +285,7 @@ def tracks(poses, camera=None, looks=None):
     track = np.full(len(poses["frame"]), -1, np.int32)
     # live: (frame, detection, box x0 y0 x1 y1, body (hip x, hip y, torso) or None), moved with the camera
     live, next_id = [], 0
+    last_hair = {}   # track -> its latest measured hair colour (a sample without one carries it over)
     for f, dets in enumerate(by_frame):
         if camera is not None and f > 0 and camera["response"][f] < actions.CUT_RESPONSE:
             live = []
@@ -245,6 +302,8 @@ def tracks(poses, camera=None, looks=None):
             dt = max(float(poses["t"][f] - poses["t"][g]), 1e-6)
             for di, jb in enumerate(dets):
                 if looks is not None and actions._look_diff(looks[ja], looks[jb]) > actions.LOOK_MAX:
+                    continue
+                if hair is not None and track[ja] in last_hair and _colour_diff(last_hair[track[ja]], hair[jb]) > HAIR_LINK_MAX:
                     continue
                 seen = 0.0 if looks is None else actions._look_diff(looks[ja], looks[jb])
                 body_b = bodies[jb]
@@ -270,9 +329,18 @@ def tracks(poses, camera=None, looks=None):
             if di not in taken_d:
                 track[j] = next_id
                 next_id += 1
+            if hair is not None and not np.isnan(hair[j]).any():
+                last_hair[track[j]] = hair[j]
         live = [x for li, x in enumerate(live) if li not in taken_l] + \
             [(f, j, _xyxy(poses["box"][j]), bodies[j]) for j in dets]
     return track
+
+
+def _colour_diff(a, b):
+    """Distance of two CIELAB colours, lightness counting half (as colour_name); 0 if either is unknown."""
+    if np.isnan(a).any() or np.isnan(b).any():
+        return 0.0
+    return float(np.sqrt((((a - b) * [0.5, 1, 1]) ** 2).sum()))
 
 
 def _xyxy(b):

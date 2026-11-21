@@ -76,6 +76,26 @@ the queue message, downloads the blob to local disk, runs the same
 `detect_standing.infer()` / `find_sections()`, uploads the CSV, and deletes the blob in a
 `finally`. The API also needs a call that issues the SAS URL. It reuses everything else.
 
+## Option C: a whole channel (`channel.py`)
+
+`standing/channel.py` downloads a channel's videos itself and searches them (see
+[running.md](running.md#2b-or-search-a-whole-channel-in-one-command)), so it needs no upload API:
+run it where there are cores. The simplest is one VM (any Linux with Python 3.12 and ffmpeg)
+with many vCPUs, running `--shard K/N` processes side by side (`--threads` each), or N machines,
+or N executions of a Container Apps job, sharing the work folder on an Azure Files share. Each run
+writes the full report from every run's results. This has not been set up on Azure; the code is
+tested locally with a stand-in for YouTube.
+
+Cost, from the speeds in [standing/README.md](../standing/README.md#searching-a-whole-channel-channelpy):
+a search for someone who appears in few videos went through video at 100x real time or more on 4
+vCPUs (`--speed quick`, after ruling a video out with a quick look), so 100 hours of video take
+about 1 hour of 4 vCPUs: 14,400 vCPU-seconds and 28,800 GiB-seconds, about $0.45 before the free
+grant. A search that has to run every step on every video ("people talking") went at about 4x
+real time, so 100 hours take about 25 hours of 4 vCPUs (or 25 machines for an hour): about $11
+before the free grant, which covers half of it. YouTube limits how fast
+one address downloads, so many machines downloading at once may need to go slower
+(`--yt-dlp-arg "--sleep-requests 1"`).
+
 ## What it costs
 
 Azure Container Apps consumption prices, East US, from the Azure Retail Prices API (Nov 2026):
@@ -101,8 +121,9 @@ for the camera's movement (about 2 minutes per hour of video, a fifth of the pos
 face pass, about 20% more when a face is in view most of the time, and talking and silent the
 camera pass and about 35 s per hour of sound for the speech and voices. Running and jumping run the
 pose model again at 5 fps, but only around moments where a whole body is in view, which in a
-sit-down show is a small part of each episode. A `who=` job adds an appearance pass (about 40 ms
-per person per sample), and for gender, voice or a name the talking inputs. Each job runs the pose model itself, so asking for two actions on the same
+sit-down show is a small part of each episode. A `who=` job adds a pass for hair and clothes
+colours when the description has them (and stops there when nobody has them), and for gender,
+voice or a name the talking inputs. Each job runs the pose model itself, so asking for two actions on the same
 video means two jobs and twice the cost; the command line shares the pose model's output
 between actions instead.
 
