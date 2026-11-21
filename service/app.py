@@ -1,28 +1,35 @@
 """HTTP API for the standing detector: upload a video, get the standing sections back as CSV.
 
+Other actions work the same way: add action=sitting, jumping, smiling or talking to the upload
+(default standing; see standing/detect_standing.py and standing/actions.py).
+
 The uploaded video only exists on local disk while it waits and is processed. It is deleted
 as soon as it has been analysed, whether the job succeeded or failed, and any videos
 left over from a crash are deleted at startup. Results are a few hundred bytes of CSV held in
 memory until DELETE or until RESULT_TTL_S after the job finished.
 
-    POST   /jobs?name=<file name>    request body = the video bytes   -> 202 {"job_id", ...}
+    POST   /jobs?name=<file name>&action=<action>   request body = the video bytes -> 202 {"job_id", ...}
     GET    /jobs/{job_id}            status: queued | processing | done | failed
-    GET    /jobs/{job_id}/sections.csv   standing sections from the interview start on
+    GET    /jobs/{job_id}/sections.csv   sections from the interview start on
     DELETE /jobs/{job_id}
     GET    /healthz
 
-Standing in the intro (title sequence, teaser, ads) is left out of the CSV; the status says
+The CSV columns are start_s, end_s, start, end, duration_s, <action>_frames and
+max_people_<action> (for standing: standing_frames, max_people_standing, as before).
+
+Sections in the intro (title sequence, teaser, ads) are left out of the CSV; the status says
 where the interview starts and how many intro sections there were. Finding the start needs the
 bank of title frames in standing/models/intro_bank.npz, built locally with
 standing/intro.py --build-bank; without it each whole video is treated as the interview.
 
 Settings (environment): API_KEY (when set, callers must send it in the x-api-key header),
 WORK_DIR, MAX_UPLOAD_MB (default 2048), RESULT_TTL_S (default 3600), MODEL, IMGSZ (default
-640), FPS (default 1).
+640), FPS (default 1), JUMP_FPS (default 5: jumping's extra samples where a whole body is in view).
 
 Run locally from the youtube-analyser folder:
     .venv/bin/uvicorn service.app:app --port 8000
     curl -X POST --data-binary @video.mp4 "http://localhost:8000/jobs?name=video.mp4"
+    curl -X POST --data-binary @video.mp4 "http://localhost:8000/jobs?name=video.mp4&action=talking"
 """
 import csv
 import io
@@ -50,9 +57,15 @@ RESULT_TTL_S = int(os.environ.get("RESULT_TTL_S", "3600"))
 MODEL = os.environ.get("MODEL", str(ds.DEFAULT_MODEL))
 IMGSZ = int(os.environ.get("IMGSZ", "640"))
 FPS = float(os.environ.get("FPS", "1"))
-CONF, MIN_FRAMES, MAX_GAP = 0.35, 2, 2  # the command line's defaults
-CSV_FIELDS = ["start_s", "end_s", "start", "end", "duration_s", "standing_frames", "max_people_standing"]
-STATUS_FIELDS = ["job_id", "name", "status", "size_mb", "created", "started", "finished",
+JUMP_FPS = float(os.environ.get("JUMP_FPS", str(ds.actions.JUMP_FPS)))
+CONF = 0.35  # the command line's default; sections use each action's default rules, as it does
+
+
+def csv_fields(action):
+    return ["start_s", "end_s", "start", "end", "duration_s", f"{action}_frames", f"max_people_{action}"]
+
+
+STATUS_FIELDS = ["job_id", "name", "action", "status", "size_mb", "created", "started", "finished",
                  "frames", "interview_start_s", "sections", "intro_sections", "still_figures_dropped",
                  "error", "video_deleted"]
 
@@ -72,15 +85,16 @@ def run_jobs():
                 job.update(status="processing", started=time.time())
         try:
             if job:
+                action, rules = job["action"], ds.ACTIONS[job["action"]]
                 poses = ds.infer(path, state["model"], FPS, CONF)
                 if not len(poses["t"]):
                     raise ValueError("no video frames could be decoded")
                 start = ds.intro.interview_start(path, state["bank"])["interview_start_s"]
-                _, sections, in_intro = ds.find_sections(poses, job["name"], MIN_FRAMES, MAX_GAP, start)
-                width, height = (int(x) for x in poses["size"])
-                sections, still = ds.drop_still_figures(path, sections, FPS, width, height)
+                extra = ds.action_input(path, poses, action, state["model"], face_models, CONF, JUMP_FPS)
+                _, sections, in_intro, still = ds.detect(path, poses, action, rules["min_frames"],
+                                                         rules["max_gap"], start, extra)
                 out = io.StringIO()
-                w = csv.DictWriter(out, CSV_FIELDS, extrasaction="ignore")
+                w = csv.DictWriter(out, csv_fields(action), extrasaction="ignore")
                 w.writeheader()
                 w.writerows(sections)
                 with lock:
@@ -95,6 +109,13 @@ def run_jobs():
             with lock:
                 if job:
                     job.update(finished=time.time(), video_deleted=not path.exists())
+
+
+def face_models():
+    """The face models, loaded by the job thread the first time smiling or talking is asked for."""
+    if "faces" not in state:
+        state["faces"] = ds.actions.FaceModels()
+    return state["faces"]
 
 
 def expire_results():
@@ -121,7 +142,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Standing detector", lifespan=lifespan)
+app = FastAPI(title="Standing and action detector", lifespan=lifespan)
 
 
 def check_key(given):
@@ -138,8 +159,11 @@ def get_job(job_id):
 
 
 @app.post("/jobs", status_code=202)
-async def create_job(request: Request, name: str = "video", x_api_key: str | None = Header(default=None)):
+async def create_job(request: Request, name: str = "video", action: str = "standing",
+                     x_api_key: str | None = Header(default=None)):
     check_key(x_api_key)
+    if action not in ds.ACTIONS:
+        raise HTTPException(400, f"action must be one of: {', '.join(ds.ACTIONS)}")
     job_id = uuid.uuid4().hex
     path = WORK_DIR / f"{job_id}.video"
     size = 0
@@ -156,7 +180,7 @@ async def create_job(request: Request, name: str = "video", x_api_key: str | Non
         path.unlink(missing_ok=True)
         raise
     with lock:
-        jobs[job_id] = {"job_id": job_id, "name": name[:200], "status": "queued",
+        jobs[job_id] = {"job_id": job_id, "name": name[:200], "action": action, "status": "queued",
                         "size_mb": round(size / 1e6, 1), "created": time.time(), "started": None,
                         "finished": None, "frames": None, "interview_start_s": None, "sections": None,
                         "intro_sections": None, "still_figures_dropped": None, "error": None,
@@ -192,4 +216,5 @@ def delete_job(job_id: str, x_api_key: str | None = Header(default=None)):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "queued": work.qsize(), "runtime": state["model"].runtime,
-            "model": Path(MODEL).name, "imgsz": IMGSZ, "fps": FPS, "intro_bank": state["bank"] is not None}
+            "model": Path(MODEL).name, "imgsz": IMGSZ, "fps": FPS, "jump_fps": JUMP_FPS,
+            "actions": list(ds.ACTIONS), "intro_bank": state["bank"] is not None}

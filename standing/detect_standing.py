@@ -1,8 +1,17 @@
-"""Find the sections of each video where someone is standing.
+"""Find the sections of each video where someone is standing, or doing another --action.
 
 Samples frames with ffmpeg, runs a YOLO pose model (ONNX, CPU) on each frame, classifies
 every detected person as standing, sitting or unknown from their hip/knee/ankle geometry,
 and joins standing frames into time ranges.
+
+--action picks what to look for (default standing):
+    standing, sitting   the leg-geometry rules below
+    jumping             the lowest foot and the hips rise and come back down; only the moments
+                        with a whole body in view are sampled again, at 5 fps (actions.py)
+    smiling, talking    each face, found from the pose model's eye and nose points, is measured
+                        by two small face models over a short burst of frames (actions.py)
+All actions share the same pose-model output, so a second action on the same videos does not
+run the pose model again.
 
 Standing before the interview starts (title sequence, teaser, ads; see intro.py) is listed
 separately in intro.csv, and statues and posters are dropped into dropped.csv.
@@ -12,9 +21,13 @@ Changing a threshold below and running again with --reclassify redoes only the c
 
 Usage (from the youtube-analyser folder):
     .venv/bin/python standing/detect_standing.py *.mp4 --out standing/output
+    .venv/bin/python standing/detect_standing.py *.mp4 --out standing/output --action talking
 
-Outputs in --out:
+Outputs in --out (for an action other than standing, the files below except poses/ and
+faces/ are in --out/<action>/ instead, with the action's name in place of "standing"):
     poses/<video>.npz     every person found in every sampled frame (17 body points each)
+                          (<video>.dense.npz: the extra samples for jumping)
+    faces/<video>.npz     face measurements for smiling and talking
     frames/<video>.csv    one row per sampled frame
     segments/<video>.csv  standing sections of that video (its presence marks the video done)
     thumbs/*.jpg          best frame of each section, with the detected skeletons drawn
@@ -47,6 +60,7 @@ except ImportError:  # onnxruntime alone still works, just slower
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import intro  # noqa: E402  (standing/intro.py: where the interview starts)
+import actions  # noqa: E402  (standing/actions.py: rules for jumping, smiling and talking)
 DEFAULT_MODEL = HERE / "models" / "yolo11s-pose.onnx"
 NAME_RE = re.compile(r"^(\d{8})_(.{11})$")
 
@@ -56,11 +70,48 @@ LEGS = ((L_HIP, L_KNEE, L_ANK), (R_HIP, R_KNEE, R_ANK))
 SKELETON = [(5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12),
             (11, 13), (13, 15), (12, 14), (14, 16)]
 COLORS = {"standing": (60, 200, 60), "sitting": (255, 150, 30), "unknown": (170, 170, 170)}  # BGR
+ACTION_COLOR, OTHER_COLOR = (60, 200, 60), (255, 150, 30)  # for actions other than standing
 
-FRAME_FIELDS = ["t", "people", "standing", "sitting", "unknown", "best_drop", "best_knee"]
-SEGMENT_FIELDS = ["video", "start_s", "end_s", "start", "end", "duration_s", "standing_frames",
-                  "max_people_standing", "best_drop", "still_diff", "youtube", "thumb"]
 INTERVIEW_FIELDS = ["video", "interview_start_s", "interview_start", "title_end_s", "how"]
+
+# What each --action looks for. states: the labels counted in frames/<video>.csv, the action's
+# own label first. stats: measurements reported per frame as best_<name> (largest in the frame).
+# score: the measurement whose largest value picks a section's thumbnail, reported as
+# best_<score>. min_frames / max_gap: the default section rules, in sampled frames.
+# still: drop sections whose figures never move (statues, posters); jumping and talking are
+# movement already.
+ACTIONS = {
+    "standing": {"states": ("standing", "sitting", "unknown"), "stats": ("drop", "knee"), "score": "drop",
+                 "min_frames": 2, "max_gap": 2, "still": True},
+    "sitting": {"states": ("sitting", "standing", "unknown"), "stats": ("drop", "knee"), "score": "conf",
+                "min_frames": 2, "max_gap": 2, "still": True},
+    # in JUMP_FPS samples: one airborne frame is a jump; jumps up to 1 s apart are one section
+    "jumping": {"states": ("jumping", "on the ground", "unknown"), "stats": ("rise",), "score": "rise",
+                "min_frames": 1, "max_gap": 4, "still": False},
+    "smiling": {"states": ("smiling", "not smiling", "unknown"), "stats": ("happy", "eyes"), "score": "happy",
+                "min_frames": 2, "max_gap": 2, "still": True},
+    "talking": {"states": ("talking", "quiet", "unknown"), "stats": ("mouth_move", "eyes"), "score": "mouth_move",
+                "min_frames": 2, "max_gap": 2, "still": False},
+}
+ROUND = {"knee": 0, "eyes": 1}  # decimals in the CSVs; everything else has 2
+
+
+def frame_fields(action="standing"):
+    a = ACTIONS[action]
+    return ["t", "people", *a["states"], *[f"best_{m}" for m in a["stats"]]]
+
+
+def segment_fields(action="standing"):
+    return ["video", "start_s", "end_s", "start", "end", "duration_s", f"{action}_frames",
+            f"max_people_{action}", f"best_{ACTIONS[action]['score']}", "still_diff", "youtube", "thumb"]
+
+
+FRAME_FIELDS, SEGMENT_FIELDS = frame_fields(), segment_fields()  # standing's
+
+
+def rounded(name, v):
+    d = ROUND.get(name, 2)
+    return round(v) if d == 0 else round(float(v), d)
 
 # Thresholds for one leg, in units of the person's torso length (mid-shoulder to mid-hip).
 # A standing thigh hangs below the hip by roughly a torso length; a seated thigh points
@@ -92,6 +143,7 @@ ABOVE_SITTER = 0.35                    # standing shoulders must be this far abo
 # A section whose standing figures all stay below STILL_DIFF is dropped as a still figure.
 STILL_DIFF = 3.5                       # mean absolute grey-level change inside the figure's box
 STILL_PAIR_S = 3                       # compare standing samples up to this many seconds apart
+STILL_CHUNK_S = 300                    # longer sections are read in pieces of this many seconds
 
 # Standing in the intro (title sequence, teaser, ads) is reported separately; intro.py finds
 # where the interview starts. A section that starts in the intro and ends at most this many
@@ -115,8 +167,21 @@ def probe(path):
 
 def read_frames(path, fps, w, h):
     """Yield (seconds, BGR frame) at `fps` frames per second, decoded by ffmpeg."""
-    p = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"fps={fps}",
-                          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE)
+    yield from _decode(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"fps={fps}",
+                        "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], fps, w, h)
+
+
+def read_windows(path, windows, fps, w, h):
+    """Yield (window number, seconds, BGR frame) at `fps` inside each (t0, t1) window."""
+    for n, (t0, t1) in enumerate(windows):
+        for t, img in _decode(["ffmpeg", "-v", "error", "-ss", f"{t0:.3f}", "-i", str(path), "-t",
+                               f"{t1 - t0:.3f}", "-an", "-vf", f"fps={fps}", "-f", "rawvideo",
+                               "-pix_fmt", "bgr24", "-"], fps, w, h):
+            yield n, round(t0 + t, 3), img
+
+
+def _decode(cmd, fps, w, h):
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     size, k = w * h * 3, 0
     try:
         while True:
@@ -250,25 +315,49 @@ class PoseModel:
             raise RuntimeError(f"pose model returned {nxt} of {count} frames")
 
 
-def infer(path, model, fps, conf):
-    """Run the pose model on every sampled frame. Returns the arrays saved in poses/*.npz."""
+def infer(path, model, fps, conf, windows=None):
+    """Run the pose model on every sampled frame. Returns the arrays saved in poses/*.npz.
+
+    With windows (a list of (start, end) seconds), only frames inside them are sampled, and
+    each frame's window number and the picture's shift from the frame before (the camera
+    moving; phase correlation, with its response, which drops at a cut) are added.
+    """
     w, h = probe(path)
     times, frame, confs, boxes, kps = [], [], [], [], []
+    motion = {"window": [], "shift": [], "response": []}
 
     def images():
-        for t, img in read_frames(path, fps, w, h):
+        if windows is None:
+            for t, img in read_frames(path, fps, w, h):
+                times.append(t)
+                yield img
+            return
+        hann, prev = cv2.createHanningWindow((w, h), cv2.CV_32F), (None, None)
+        for n, t, img in read_windows(path, windows, fps, w, h):
+            grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            (dx, dy), r = cv2.phaseCorrelate(prev[1], grey, hann) if prev[0] == n else ((np.nan, np.nan), 0.0)
+            prev = (n, grey)
             times.append(t)
+            motion["window"].append(n)
+            motion["shift"].append((dx, dy))
+            motion["response"].append(r)
             yield img
 
-    for i, (c, b, k) in enumerate(model.run(images(), conf)):
+    for i, (c, b, k) in enumerate(model.run(images(), conf) if model is not None else ()):
         frame += [i] * len(c)
         confs.append(c)
         boxes.append(b)
         kps.append(k)
     cat = lambda xs, shape: np.concatenate(xs) if xs else np.zeros(shape, np.float32)
-    return {"t": np.array(times, np.float32), "frame": np.array(frame, np.int32),
-            "conf": cat(confs, (0,)), "box": cat(boxes, (0, 4)), "kp": cat(kps, (0, 17, 3)),
-            "size": np.array([w, h]), "fps": np.float32(fps)}
+    out = {"t": np.array(times, np.float32), "frame": np.array(frame, np.int32),
+           "conf": cat(confs, (0,)), "box": cat(boxes, (0, 4)), "kp": cat(kps, (0, 17, 3)),
+           "size": np.array([w, h]), "fps": np.float32(fps)}
+    if windows is not None:  # times like 7.4 s are kept exact (float32 would print 7.400000095)
+        out.update(t=np.array(times, np.float64),
+                   window=np.array(motion["window"], np.int32), response=np.array(motion["response"], np.float32),
+                   shift=np.array(motion["shift"], np.float32).reshape(-1, 2),
+                   windows=np.array(windows, np.float32).reshape(-1, 2))
+    return out
 
 
 def angle(a, b, c):
@@ -294,7 +383,7 @@ def classify(kp, img_h):
     torso = float(np.linalg.norm(hip - sho))
     if torso < 3:
         return "unknown", {}
-    votes, drops, knees = [], [], []
+    votes, why, drops, knees = [], [], [], []
     for h, k, a in LEGS:
         if not (ok[h] and ok[k]):
             continue
@@ -310,17 +399,31 @@ def classify(kp, img_h):
         if (knee is not None and knee >= STAND_KNEE and drop >= STAND_DROP
                 and tilt <= STAND_TILT and shin_thigh <= MAX_SHIN_THIGH):
             votes.append("standing")
+            why.append("")
         elif drop < SIT_DROP or tilt > SIT_TILT or (knee is not None and knee < SIT_KNEE):
             votes.append("sitting")
+            why.append("thigh" if drop < SIT_DROP or tilt > SIT_TILT else "knee")
         else:
             votes.append("unknown")
+            why.append("")
     m = {"drop": max(drops) if drops else None, "knee": max(knees) if knees else None,
-         "torso": torso, "sho_y": float(sho[1])}
+         "torso": torso, "sho_y": float(sho[1]), "votes": list(zip(votes, why))}
     if "sitting" in votes:
         return "sitting", m
     if "standing" in votes:
         return "standing", m
     return "unknown", m
+
+
+def seated(m):
+    """Stricter sitting, for --action sitting: no leg looks standing, and a thigh is level or
+    sideways, or every leg seen is bent. The standing rules count a single bent knee as sitting,
+    which also catches the back leg of someone walking (seen on a test clip)."""
+    legs = m.get("votes", [])
+    if any(v == "standing" for v, _ in legs):
+        return False
+    sitting = [w for v, w in legs if v == "sitting"]
+    return "thigh" in sitting or len(legs) >= 2 and len(sitting) == len(legs)
 
 
 def level_with(stander, sitter):
@@ -331,10 +434,13 @@ def level_with(stander, sitter):
     return sitter["sho_y"] - stander["sho_y"] < ABOVE_SITTER * a  # image y grows downwards
 
 
-def draw(img, people, scale=3):
+def draw(img, people, scale=3, action="standing"):
     out = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     for p in people:
-        color = COLORS[p["state"]]
+        color = COLORS.get(p["state"]) or (ACTION_COLOR if p["state"] == action else OTHER_COLOR)
+        if p.get("face_box") is not None:
+            x, y, bw, bh = (int(v * scale) for v in p["face_box"])
+            cv2.rectangle(out, (x, y), (x + bw, y + bh), color, 1, cv2.LINE_AA)
         kp, ok = p["kp"][:, :2] * scale, p["kp"][:, 2] >= ANKLE_VIS
         for a, b in SKELETON:
             if ok[a] and ok[b]:
@@ -347,71 +453,89 @@ def draw(img, people, scale=3):
     return out
 
 
-def find_sections(poses, name, min_frames, max_gap, interview_start=0):
-    """Classify everyone in the poses and join standing frames into sections.
+def label_people(poses, action="standing", extra=None):
+    """Everyone in every sampled frame, with a state for the action.
 
-    Returns (frames, sections, intro): one row per sampled frame, the sections from the
-    interview start on, and the sections before it (in the intro). Each has at least
-    min_frames standing frames and keeps best_t / best_people for drawing a thumbnail.
-    A section that starts in the intro and ends within INTRO_GRACE_S of the interview start
-    belongs to the intro (the detected start can fall inside a crossfade); one that runs on
-    longer is split at the interview start.
+    Returns (timeline, people per frame): timeline is poses, except for jumping, where it is the
+    dense samples (extra). For smiling and talking, extra is the face measurements.
     """
+    if action == "jumping":
+        return extra, actions.label_jumps(extra)
     h = int(poses["size"][1])
     by_frame = [[] for _ in poses["t"]]
     for j, f in enumerate(poses["frame"]):
         state, meas = classify(poses["kp"][j], h)
-        by_frame[f].append({"kp": poses["kp"][j], "box": poses["box"][j], "state": state, "m": meas})
+        by_frame[f].append({"j": j, "kp": poses["kp"][j], "box": poses["box"][j], "state": state,
+                            "m": {**meas, "conf": float(poses["conf"][j])}})
     for people in by_frame:
         sitters = [p["m"] for p in people if p["state"] == "sitting"]
         for p in people:
             if p["state"] == "standing" and any(level_with(p["m"], s) for s in sitters):
                 p["state"] = "sitting"
+            elif action == "sitting" and p["state"] == "sitting" and not seated(p["m"]):
+                p["state"] = "unknown"
+    if action in ("smiling", "talking"):
+        actions.label_faces(by_frame, poses, extra, action)
+    return poses, by_frame
 
-    frames, whole = join_sections(poses, by_frame, name, min_frames, max_gap)
+
+def find_sections(poses, name, min_frames, max_gap, interview_start=0, action="standing", extra=None):
+    """Classify everyone in the poses and join the frames showing the action into sections.
+
+    Returns (frames, sections, intro): one row per sampled frame, the sections from the
+    interview start on, and the sections before it (in the intro). Each has at least
+    min_frames frames showing the action and keeps best_t / best_people for drawing a thumbnail.
+    A section that starts in the intro and ends within INTRO_GRACE_S of the interview start
+    belongs to the intro (the detected start can fall inside a crossfade); one that runs on
+    longer is split at the interview start. extra: see label_people.
+    """
+    timeline, by_frame = label_people(poses, action, extra)
+    frames, whole = join_sections(timeline, by_frame, name, min_frames, max_gap, action=action)
     if not interview_start:
         return frames, whole, []
     cut = interview_start
     for s in whole:
         if s["start_s"] < interview_start < s["end_s"] <= interview_start + INTRO_GRACE_S:
             cut = max(cut, s["end_s"])
-    _, in_intro = join_sections(poses, by_frame, name, min_frames, max_gap, until=cut)
-    _, sections = join_sections(poses, by_frame, name, min_frames, max_gap, since=cut)
+    _, in_intro = join_sections(timeline, by_frame, name, min_frames, max_gap, until=cut, action=action)
+    _, sections = join_sections(timeline, by_frame, name, min_frames, max_gap, since=cut, action=action)
     return frames, sections, in_intro
 
 
-def join_sections(poses, by_frame, name, min_frames, max_gap, since=0.0, until=math.inf):
-    """One row per sampled frame, and the standing sections between since and until."""
+def join_sections(poses, by_frame, name, min_frames, max_gap, since=0.0, until=math.inf, action="standing"):
+    """One row per sampled frame, and the sections of the action between since and until."""
+    a = ACTIONS[action]
     fps = float(poses["fps"])
     frames, segments, cur = [], [], None
     for t, people in zip(poses["t"].tolist(), by_frame):
         states = [p["state"] for p in people]
-        standing = [p for p in people if p["state"] == "standing"]
-        drops = [p["m"]["drop"] for p in people if p["m"].get("drop") is not None]
-        knees = [p["m"]["knee"] for p in people if p["m"].get("knee") is not None]
-        frames.append({"t": t, "people": len(people), "standing": len(standing),
-                       "sitting": states.count("sitting"), "unknown": states.count("unknown"),
-                       "best_drop": round(float(max(drops)), 2) if drops else "",
-                       "best_knee": round(max(knees)) if knees else ""})
-        if not standing or not since <= t < until:
+        active = [p for p in people if p["state"] == action]
+        row = {"t": t, "people": len(people), **{s: states.count(s) for s in a["states"]}}
+        for m in a["stats"]:
+            values = [p["m"][m] for p in people if p["m"].get(m) is not None]
+            row[f"best_{m}"] = rounded(m, max(values)) if values else ""
+        frames.append(row)
+        if not active or not since <= t < until:
             continue
-        score = float(max(p["m"]["drop"] for p in standing))
+        score = float(max(p["m"][a["score"]] for p in active))
         if cur and t - cur["last_t"] <= (max_gap + 1) / fps:
             cur.update(end_s=t + 1 / fps, last_t=t)
-            cur["standing_frames"] += 1
-            cur["max_people_standing"] = max(cur["max_people_standing"], len(standing))
+            cur["n"] += 1
+            cur["most"] = max(cur["most"], len(active))
         else:
-            cur = {"video": name, "start_s": t, "end_s": t + 1 / fps, "last_t": t,
-                   "standing_frames": 1, "max_people_standing": len(standing), "best_drop": -1,
-                   "boxes": []}
+            cur = {"video": name, "start_s": t, "end_s": t + 1 / fps, "last_t": t, "n": 1,
+                   "most": len(active), "best": -math.inf, "boxes": []}
             segments.append(cur)
-        cur["boxes"].append((t, [p["box"] for p in standing]))
-        if score > cur["best_drop"]:
-            cur.update(best_drop=round(score, 2), best_t=t, best_people=people)
+        cur["boxes"].append((t, [p["box"] for p in active]))
+        if score > cur["best"]:  # compared with the rounded best, as the CSV shows it
+            cur.update(best=rounded(a["score"], score), best_t=t, best_people=people)
 
-    segments = [s for s in segments if s["standing_frames"] >= min_frames]
+    segments = [s for s in segments if s["n"] >= min_frames]
     for s in segments:
-        s.update(start=hms(s["start_s"]), end=hms(s["end_s"]), duration_s=round(s["end_s"] - s["start_s"], 1))
+        if action != "standing":  # jumping's 0.2 s steps would otherwise show as 3.4000000000000004
+            s.update(start_s=round(s["start_s"], 3), end_s=round(s["end_s"], 3))
+        s.update({f"{action}_frames": s["n"], f"max_people_{action}": s["most"], f"best_{a['score']}": s["best"]},
+                 start=hms(s["start_s"]), end=hms(s["end_s"]), duration_s=round(s["end_s"] - s["start_s"], 1))
     return frames, segments
 
 
@@ -434,14 +558,33 @@ def overlap(a, b):
 
 
 def still_diff(path, section, fps, w, h):
-    """Largest pixel change of the section's standing figures between nearby samples.
+    """Largest pixel change of the section's figures between nearby samples.
 
     None when no figure is seen twice within STILL_PAIR_S seconds (then it can't be judged).
+    A section longer than STILL_CHUNK_S (sitting or smiling can last most of an episode) is
+    read a piece at a time, and only until a piece shows the figure moving: the largest change
+    found up to then is returned.
     """
-    frames = read_range(path, section["boxes"][0][0], section["boxes"][-1][0], fps, w, h)
+    boxes = section["boxes"]
+    if boxes[-1][0] - boxes[0][0] <= STILL_CHUNK_S:
+        return _still_diff(read_range(path, boxes[0][0], boxes[-1][0], fps, w, h), boxes, w, h)
+    best, i = None, 0
+    while i < len(boxes):
+        t0 = boxes[i][0]
+        part = [b for b in boxes[i:] if b[0] <= t0 + STILL_CHUNK_S + STILL_PAIR_S]
+        n = sum(b[0] < t0 + STILL_CHUNK_S for b in part)  # pairs start in this piece
+        d = _still_diff(read_range(path, t0, part[-1][0], fps, w, h), part, w, h, starts=n)
+        best = d if best is None else best if d is None else max(best, d)
+        if best is not None and best >= STILL_DIFF:
+            break
+        i += n
+    return best
+
+
+def _still_diff(frames, boxes, w, h, starts=None):
     best = None
-    for i, (ta, boxes_a) in enumerate(section["boxes"]):
-        for tb, boxes_b in section["boxes"][i + 1:]:
+    for i, (ta, boxes_a) in enumerate(boxes[:starts]):
+        for tb, boxes_b in boxes[i + 1:]:
             if tb - ta > STILL_PAIR_S:
                 break
             fa, fb = frames.get(round(ta, 3)), frames.get(round(tb, 3))
@@ -477,29 +620,67 @@ def find_interview_start(path, bank):
     return {"video": path.name, **r, "interview_start": hms(r["interview_start_s"])}
 
 
-def analyse(path, poses, args, out_dir, bank=None):
+def action_input(path, poses, action, pose_model, face_models, conf, jump_fps=actions.JUMP_FPS):
+    """What an action needs besides the poses: the dense samples for jumping, faces for smiling
+    and talking, nothing for standing and sitting. pose_model / face_models are only used when
+    needed, and may be functions that load them (a PoseModel is callable itself, so the type
+    tells them apart)."""
+    if action == "jumping":
+        _, by_frame = label_people(poses)
+        states = {p["j"]: p["state"] for people in by_frame for p in people}
+        windows = actions.jump_windows(poses, [states[j] for j in range(len(poses["frame"]))])
+        if not windows:  # nobody in full view: nothing to sample, so the model is not needed
+            model = None
+        else:
+            model = pose_model if isinstance(pose_model, PoseModel) else pose_model()
+        return infer(path, model, jump_fps, conf, windows)
+    if action in ("smiling", "talking"):
+        w, h = (int(x) for x in poses["size"])
+        models = face_models if isinstance(face_models, actions.FaceModels) else face_models()
+        faces = actions.analyse_faces(read_frames(path, 1 / actions.BURST_STEP, w, h), poses, models)
+        faces["poses_n"] = np.int32(len(poses["frame"]))
+        return faces
+    return None
+
+
+def detect(path, poses, action, min_frames, max_gap, interview_start=0, extra=None):
+    """The sections of one video: (frames, sections, intro sections, sections dropped as still)."""
+    frames, sections, in_intro = find_sections(poses, path.name, min_frames, max_gap, interview_start,
+                                               action, extra)
+    if ACTIONS[action]["still"]:
+        w, h = (int(x) for x in poses["size"])
+        sections, dropped = drop_still_figures(path, sections, float(poses["fps"]), w, h)
+    else:
+        dropped = []
+        for s in sections:
+            s["still_diff"] = ""
+    return frames, sections, in_intro, dropped
+
+
+def analyse(path, poses, args, out_dir, bank=None, extra=None):
     """Find the sections in the saved poses; write the per-video CSVs and thumbnails."""
+    action = getattr(args, "action", "standing")
     stem = path.stem
     w, h = (int(x) for x in poses["size"])
-    fps = float(poses["fps"])
+    fps = float((extra if action == "jumping" else poses)["fps"])  # the rate the sections were sampled at
     m = NAME_RE.match(stem)
     url = f"https://www.youtube.com/watch?v={m.group(2)}" if m else ""
     start = find_interview_start(path, bank)
-    frames, segments, in_intro = find_sections(poses, path.name, args.min_frames, args.max_gap,
-                                               start["interview_start_s"])
-    segments, dropped = drop_still_figures(path, segments, fps, w, h)
+    frames, segments, in_intro, dropped = detect(path, poses, action, args.min_frames, args.max_gap,
+                                                 start["interview_start_s"], extra)
     for old in (out_dir / "thumbs").glob(f"{glob_escape(stem)}_*.jpg"):
         old.unlink()
     for s in segments + dropped + in_intro:
         s["thumb"] = f"{stem}_{int(s['start_s']):05d}.jpg"
         img = grab_frame(path, s["best_t"], fps, w, h)
-        cv2.imwrite(str(out_dir / "thumbs" / s["thumb"]), draw(img, s["best_people"]))
+        cv2.imwrite(str(out_dir / "thumbs" / s["thumb"]), draw(img, s["best_people"], action=action))
         s["youtube"] = f"{url}&t={int(s['start_s'])}s" if url else ""
-    write_csv(out_dir / "frames" / f"{stem}.csv", FRAME_FIELDS, frames)
+    fields = segment_fields(action)
+    write_csv(out_dir / "frames" / f"{stem}.csv", frame_fields(action), frames)
     write_csv(out_dir / "interview" / f"{stem}.csv", INTERVIEW_FIELDS, [start])
-    write_csv(out_dir / "intro" / f"{stem}.csv", SEGMENT_FIELDS, in_intro)
-    write_csv(out_dir / "dropped" / f"{stem}.csv", SEGMENT_FIELDS, dropped)
-    write_csv(out_dir / "segments" / f"{stem}.csv", SEGMENT_FIELDS, segments)  # written last: marks done
+    write_csv(out_dir / "intro" / f"{stem}.csv", fields, in_intro)
+    write_csv(out_dir / "dropped" / f"{stem}.csv", fields, dropped)
+    write_csv(out_dir / "segments" / f"{stem}.csv", fields, segments)  # written last: marks done
     return len(frames), len(segments), len(dropped), len(in_intro), start["interview_start"]
 
 
@@ -516,50 +697,86 @@ def write_csv(path, fields, rows):
     tmp.replace(path)
 
 
-def combine(out_dir):
+def combine(out_dir, action="standing"):
     """Write the combined CSVs and review.html for every video processed into out_dir."""
+    fields, label = segment_fields(action), action.capitalize()
     found = {}
-    for kind, fields, out in (("segments", SEGMENT_FIELDS, "segments"), ("dropped", SEGMENT_FIELDS, "dropped"),
-                              ("intro", SEGMENT_FIELDS, "intro"), ("interview", INTERVIEW_FIELDS, "interview_starts")):
+    for kind, kind_fields, out in (("segments", fields, "segments"), ("dropped", fields, "dropped"),
+                                   ("intro", fields, "intro"), ("interview", INTERVIEW_FIELDS, "interview_starts")):
         found[kind] = []
         for p in sorted((out_dir / kind).glob("*.csv")):
             with open(p, newline="") as f:
                 found[kind] += list(csv.DictReader(f))
-        write_csv(out_dir / f"{out}.csv", fields, found[kind])
+        write_csv(out_dir / f"{out}.csv", kind_fields, found[kind])
 
     def cards(rows):
         return "\n".join(
             f'<figure><a href="thumbs/{html.escape(r["thumb"])}"><img src="thumbs/{html.escape(r["thumb"])}" loading="lazy"></a>'
             f'<figcaption>{html.escape(r["video"])}<br>{r["start"]} to {r["end"]} ({r["duration_s"]}s, '
-            f'{r["standing_frames"]} frames, pixel change {r["still_diff"] or "n/a"})'
+            f'{r[f"{action}_frames"]} frames, pixel change {r["still_diff"] or "n/a"})'
             + (f' · <a href="{html.escape(r["youtube"])}">YouTube</a>' if r["youtube"] else "")
             + "</figcaption></figure>" for r in rows)
 
     (out_dir / "review.html").write_text(
-        "<!doctype html><meta charset=utf-8><title>Standing sections</title>"
+        f"<!doctype html><meta charset=utf-8><title>{label} sections</title>"
         "<style>body{font:14px system-ui;margin:16px;background:#fff;color:#111}"
         "main{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px}"
         "figure{margin:0}img{width:100%;border-radius:4px}figcaption{margin-top:4px}</style>"
-        f"<h1>Standing sections ({len(found['segments'])})</h1><main>{cards(found['segments'])}</main>"
+        f"<h1>{label} sections ({len(found['segments'])})</h1><main>{cards(found['segments'])}</main>"
         f"<h2>Dropped as still figures ({len(found['dropped'])})</h2>"
         f"<p>Statues, posters and other figures that never moved (pixel change under {STILL_DIFF}).</p>"
         f"<main>{cards(found['dropped'])}</main>"
         f"<h2>In the intro ({len(found['intro'])})</h2>"
-        "<p>Standing before the interview starts: title sequences, teasers and ads.</p>"
+        f"<p>{label} before the interview starts: title sequences, teasers and ads.</p>"
         f"<main>{cards(found['intro'])}</main>")
     return found["segments"], found["dropped"], found["intro"]
+
+
+def save_npz(path, arrays):
+    np.savez_compressed(path.with_suffix(".tmp.npz"), **arrays)
+    path.with_suffix(".tmp.npz").replace(path)
+
+
+def load_input(v, poses, args, models):
+    """action_input() for one video, from its cache file in --out when still valid."""
+    if args.action == "jumping":
+        path = args.out / "poses" / f"{v.stem}.dense.npz"
+        check = lambda d: float(d["fps"]) == args.jump_fps
+    elif args.action in ("smiling", "talking"):
+        path = args.out / "faces" / f"{v.stem}.npz"
+        check = lambda d: (int(d["poses_n"]) == len(poses["frame"])
+                           and float(d["burst_step"]) == np.float32(actions.BURST_STEP))
+    else:
+        return None, ""
+    if path.exists() and not args.force:
+        saved = dict(np.load(path))
+        if check(saved):
+            return saved, ""
+    extra = action_input(v, poses, args.action, models["pose"], models["faces"], args.conf, args.jump_fps)
+    save_npz(path, extra)
+    if args.action == "jumping":
+        seconds = sum(b - a for a, b in extra["windows"])
+        return extra, f"; {seconds:.0f}s sampled again at {args.jump_fps:g} fps"
+    return extra, f"; {len(extra['det'])} faces measured"
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("videos", nargs="+", type=Path)
-    ap.add_argument("--out", type=Path, default=HERE / "output")
+    ap.add_argument("--action", choices=list(ACTIONS), default="standing", help="what to look for")
+    ap.add_argument("--out", type=Path, default=HERE / "output",
+                    help="output folder; actions other than standing write to a subfolder named after "
+                         "the action, and all actions share its poses/")
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("--imgsz", type=int, default=640, help="longest side fed to the model")
     ap.add_argument("--fps", type=float, default=1.0, help="frames sampled per second of video")
+    ap.add_argument("--jump-fps", type=float, default=actions.JUMP_FPS,
+                    help="jumping: frames per second sampled where a whole body is in view")
     ap.add_argument("--conf", type=float, default=0.35, help="minimum person confidence")
-    ap.add_argument("--min-frames", type=int, default=2, help="standing frames needed for a section")
-    ap.add_argument("--max-gap", type=int, default=2, help="non-standing frames allowed inside a section")
+    ap.add_argument("--min-frames", type=int, help="frames showing the action needed for a section "
+                    "(default 2; 1 for jumping)")
+    ap.add_argument("--max-gap", type=int, help="frames without it allowed inside a section "
+                    "(default 2; 4 for jumping, whose frames are 0.2 s apart)")
     ap.add_argument("--runtime", choices=["auto", "openvino", "onnxruntime"], default="auto",
                     help="auto = OpenVINO if installed, else onnxruntime")
     ap.add_argument("--threads", type=int, default=0, help="inference threads (0 = automatic)")
@@ -570,18 +787,35 @@ def main():
                     help="title frames that mark the intro (see intro.py)")
     ap.add_argument("--keep-intro", action="store_true", help="treat the whole video as the interview")
     args = ap.parse_args()
+    action = args.action
+    if args.min_frames is None:
+        args.min_frames = ACTIONS[action]["min_frames"]
+    if args.max_gap is None:
+        args.max_gap = ACTIONS[action]["max_gap"]
 
-    for sub in ("poses", "frames", "segments", "dropped", "intro", "interview", "thumbs"):
-        (args.out / sub).mkdir(parents=True, exist_ok=True)
+    out_dir = args.out if action == "standing" else args.out / action
+    (args.out / "poses").mkdir(parents=True, exist_ok=True)
+    if action in ("smiling", "talking"):
+        (args.out / "faces").mkdir(parents=True, exist_ok=True)
+    for sub in ("frames", "segments", "dropped", "intro", "interview", "thumbs"):
+        (out_dir / sub).mkdir(parents=True, exist_ok=True)
     bank = None if args.keep_intro else intro.load_bank(args.intro_bank)
     if bank is None and not args.keep_intro:
         print(f"no intro bank at {args.intro_bank}: the intro is not separated", file=sys.stderr)
-    model = None
+    loaded = {}
+
+    def model(name):  # load each model the first time it is needed
+        if name not in loaded:
+            loaded[name] = (PoseModel(args.model, args.imgsz, args.threads, args.runtime) if name == "pose"
+                            else actions.FaceModels(args.runtime, args.threads))
+        return loaded[name]
+
+    models = {"pose": lambda: model("pose"), "faces": lambda: model("faces")}
     # yt-dlp leaves unmerged format files such as X.f278.webm next to X.webm; skip those.
     videos = [v for v in args.videos if not re.search(r"\.f\d+$", v.stem)]
     for i, v in enumerate(videos, 1):
         pose_file = args.out / "poses" / f"{v.stem}.npz"
-        done = (args.out / "segments" / f"{v.stem}.csv").exists()
+        done = (out_dir / "segments" / f"{v.stem}.csv").exists()
         if done and not (args.reclassify or args.force):
             print(f"[{i}/{len(videos)}] {v.name}: done already, skipping", flush=True)
             continue
@@ -591,23 +825,22 @@ def main():
                 poses = dict(np.load(pose_file))
                 how = "saved poses"
             else:
-                model = model or PoseModel(args.model, args.imgsz, args.threads, args.runtime)
-                poses = infer(v, model, args.fps, args.conf)
-                np.savez_compressed(pose_file.with_suffix(".tmp.npz"), **poses)
-                pose_file.with_suffix(".tmp.npz").replace(pose_file)
+                poses = infer(v, model("pose"), args.fps, args.conf)
+                save_npz(pose_file, poses)
                 how = f"{1000 * (time.perf_counter() - started) / max(len(poses['t']), 1):.0f} ms/frame"
-            n_frames, n_segments, n_dropped, n_intro, start = analyse(v, poses, args, args.out, bank)
+            extra, more = load_input(v, poses, args, models)
+            n_frames, n_segments, n_dropped, n_intro, start = analyse(v, poses, args, out_dir, bank, extra)
         except Exception as e:  # keep going on a bad file; it stays unmarked and is retried next run
             print(f"[{i}/{len(videos)}] {v.name}: FAILED {e}", file=sys.stderr, flush=True)
             continue
         print(f"[{i}/{len(videos)}] {v.name}: interview from {start}, {n_frames} frames, "
-              f"{n_segments} standing sections"
+              f"{n_segments} {action} sections"
               + (f" ({n_intro} more in the intro)" if n_intro else "")
               + (f" ({n_dropped} still figures dropped)" if n_dropped else "")
-              + f", {time.perf_counter() - started:.0f}s ({how})", flush=True)
-    kept, dropped, in_intro = combine(args.out)
-    print(f"{len(kept)} standing sections in total ({len(in_intro)} more in intros, {len(dropped)} still "
-          f"figures dropped) -> {args.out / 'segments.csv'}, {args.out / 'review.html'}")
+              + f", {time.perf_counter() - started:.0f}s ({how}{more})", flush=True)
+    kept, dropped, in_intro = combine(out_dir, action)
+    print(f"{len(kept)} {action} sections in total ({len(in_intro)} more in intros, {len(dropped)} still "
+          f"figures dropped) -> {out_dir / 'segments.csv'}, {out_dir / 'review.html'}")
 
 
 if __name__ == "__main__":

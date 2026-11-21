@@ -2,8 +2,11 @@
 *
 !standing/detect_standing.py
 !standing/intro.py
+!standing/actions.py
 !standing/models/intro_bank.npz
 !standing/requirements.txt
 !standing/models/yolo11s-pose.onnx
+!standing/models/face_landmark.onnx
+!standing/models/face_expression.onnx
 !service/app.py
 !service/requirements.txt

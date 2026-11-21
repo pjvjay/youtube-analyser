@@ -13,5 +13,11 @@ from real rows.
 | `results/outside_interview.csv` | `results/outside_interview.csv` | `make_report.py`: standing in the intros, and sections marked `after the interview` |
 | `results/interview_starts.csv` | `results/interview_starts.csv` | `make_report.py`, from `intro.py`: where each video's interview starts and how it was found (`title`, `angles`, `shared`, `short video`) |
 
+For the other actions (`make_report.py --action sitting|jumping|smiling|talking`) the same files
+are written to `results/<action>/`, with `<action>_sections.csv` in place of
+`standing_sections.csv` and a `people_<action>` column in place of `people_standing`. Their
+manual review goes in `results/<action>/verdicts.csv`, in the same format; until it exists every
+section is listed as `not reviewed`.
+
 Video files are expected to be named the way yt-dlp's `-o "%(upload_date)s_%(id)s.%(ext)s"`
 names them (`YYYYMMDD_<11-character id>.<ext>`); the detector builds YouTube links from that.

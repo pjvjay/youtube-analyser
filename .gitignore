@@ -13,6 +13,7 @@ __pycache__/
 
 # Detector output that is bulky or contains video frames (results CSVs are kept)
 standing/*/poses/
+standing/*/faces/
 standing/*/frames/
 standing/*/thumbs/
 standing/*/review.html
@@ -25,10 +26,19 @@ standing/models/yolo26*.onnx
 .DS_Store
 
 # Per-video copies of the combined CSVs; they only mark progress for resuming a run
+# (other actions keep theirs one level down, in <out>/<action>/)
 standing/*/segments/
 standing/*/dropped/
 standing/*/intro/
 standing/*/interview/
+standing/*/*/segments/
+standing/*/*/dropped/
+standing/*/*/intro/
+standing/*/*/interview/
+standing/*/*/frames/
+standing/*/*/thumbs/
+standing/*/*/review.html
+standing/*/*/review*.csv
 
 # Local only: anything that names or is made from the videos (inventory, yt-dlp archive, results,
 # manual review, detector output, the title-frame bank). samples/ shows the formats with made-up names.

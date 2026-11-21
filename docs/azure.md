@@ -11,9 +11,9 @@ It runs locally today and runs unchanged as an Azure Container App:
 
 | Call | Does |
 |---|---|
-| `POST /jobs?name=<file>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id` |
+| `POST /jobs?name=<file>&action=<action>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id`. `action` is `standing` (default), `sitting`, `jumping`, `smiling` or `talking` |
 | `GET /jobs/{job_id}` | `queued`, `processing`, `done` or `failed`, plus `interview_start_s`, `intro_sections` and `video_deleted` |
-| `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing`, for the interview only (the intro is left out) |
+| `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing` (for another action, `<action>_frames, max_people_<action>`), for the interview only (the intro is left out) |
 | `DELETE /jobs/{job_id}` | Forgets the job and its result |
 
 The video is deleted when processing ends, whether it succeeded or failed, and leftovers are
@@ -93,6 +93,13 @@ is about twice as fast but misses small background people.
 | GiB-seconds (2 GiB per vCPU) | 200,000–288,000 |
 | Price before the free grant | ~$3.00–4.30 |
 | Price if it's the only Container Apps use that month | $0 (within the free grant) |
+
+Other actions add to this. Sitting adds nothing. Smiling and talking add a face pass, about 20%
+more when a face is in view most of the time. Jumping runs the pose model again at 5 fps, but
+only around moments where a whole body is in view, which in a sit-down show is a small part of
+each episode. Each job runs the pose model itself, so asking for two actions on the same
+video means two jobs and twice the cost; the command line shares the pose model's output
+between actions instead.
 
 Wall-clock time scales with replicas: at 2 vCPU one replica does about 7 hours of video per
 hour, so 4 parallel jobs do 100 hours in about 3.5 hours. The same price list also has an environment management charge of $0.10 an

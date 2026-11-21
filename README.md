@@ -5,6 +5,10 @@ downloaded episodes of a sit-down interview show (each episode's intro is found 
 and left out), and offers the same detector as an upload API that deletes each video as soon as
 it has been analysed.
 
+The same pipeline finds other actions too, chosen with `--action`: **sitting**, **jumping**,
+**smiling** and **talking** (standing is the default). They reuse the pose model's output, so
+after one run the others cost little or nothing extra (see [below](#other-actions)).
+
 **Results** are written locally to `results/` and are not committed, because they name the
 videos. [`samples/`](samples/README.md) shows every results file with a few made-up rows. On the
 test set (248 videos, 210 hours) the detector reported 92 standing sections during the
@@ -15,12 +19,13 @@ in intros (nearly all title sequences) were left out automatically.
 
 | Path | What |
 |---|---|
-| `standing/detect_standing.py` | The detector: ffmpeg samples frames, a YOLO pose model finds body points, leg-geometry rules decide standing / sitting / unknown, still figures are dropped. [README](standing/README.md) |
+| `standing/detect_standing.py` | The detector: ffmpeg samples frames, a YOLO pose model finds body points, leg-geometry rules decide standing / sitting / unknown, still figures are dropped. `--action` picks what to look for. [README](standing/README.md) |
+| `standing/actions.py` | The rules for jumping (body rises and lands, from extra samples where a whole body is in view) and smiling / talking (faces found from the pose model's eyes, measured by two small face models) |
 | `standing/intro.py` | Finds where each episode's interview starts, after the teaser, title sequence and ads, by matching title footage shared across episodes |
 | `standing/make_report.py` | Turns a detector run plus `results/verdicts.csv` into the results files |
 | `standing/review_video.py` | Joins every standing section into one captioned video to watch (`standing/output/review.mp4`) |
-| `standing/models/` | The pose models (ONNX, exported from Ultralytics YOLO11; AGPL-3.0) |
-| `service/app.py` | HTTP API: upload a video, get a CSV of standing sections in the interview back; the video is deleted after processing |
+| `standing/models/` | The pose models (ONNX, exported from Ultralytics YOLO11; AGPL-3.0) and, for smiling and talking, MediaPipe's face landmark model (Apache-2.0) and a FER2013 expression model (MIT); [details](standing/README.md#models-used-by-the-actions) |
+| `service/app.py` | HTTP API: upload a video, get a CSV of standing (or `action=...`) sections in the interview back; the video is deleted after processing |
 | `Dockerfile` | The API as one container (ffmpeg, OpenVINO, model) for local use or Azure Container Apps |
 | `docs/azure.md` | Running it on Azure so you pay only for compute, with costs |
 | `samples/` | The format of the local-only files, with made-up names |
@@ -52,12 +57,34 @@ standing sections, then build the report:
 
 Without a bank the detector still runs, but treats each whole video as the interview.
 
+### Other actions
+
+```bash
+.venv/bin/python standing/detect_standing.py *.mp4 *.mkv *.webm --out standing/output --action talking
+.venv/bin/python standing/make_report.py --action talking
+.venv/bin/python standing/review_video.py --action talking
+```
+
+`--action` is `standing` (default), `sitting`, `jumping`, `smiling` or `talking`. Results go
+to `standing/output/<action>/` and `results/<action>/`. Every action shares `standing/output/poses/`,
+so the pose model runs once per video whichever action goes first:
+
+| Action | Extra cost after the pose model | Notes |
+|---|---|---|
+| sitting | none (seconds) | Only when hips and knees are in view, so not in close-ups |
+| jumping | the pose model again at 5 fps, only around moments where a whole body is in view | Jumps of under about 15 cm are often missed |
+| smiling, talking | one shared face pass, about 20% of the pose model's time when a face is in view | Smiling only in close-ups (≥ 11 px between the eyes at 144p); talking is mouth movement, so laughing counts too |
+
+These were tested on short clips only (see [standing/README.md](standing/README.md#other-actions---action)),
+not yet on the episodes: review the first results by eye before relying on them, as was done for standing.
+
 Run the API and send it a video:
 
 ```bash
 API_KEY=change-me .venv/bin/uvicorn service.app:app --port 8000
 curl -H "x-api-key: change-me" -X POST --data-binary @episode.mp4 "http://localhost:8000/jobs?name=episode.mp4"
 curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>/sections.csv
+curl -H "x-api-key: change-me" -X POST --data-binary @episode.mp4 "http://localhost:8000/jobs?name=episode.mp4&action=talking"
 ```
 
 Or as a container: `docker build -t standing-api .` and
@@ -69,3 +96,9 @@ have built it locally.
 At 1 frame per second, input size 640, on a 4-core Intel Mac with OpenVINO: about 51 ms per
 frame, so 100 hours of video take about 5 hours on this machine. In a 2-vCPU container a
 63-minute episode took 8.9 minutes. See [`docs/azure.md`](docs/azure.md) for cloud costs.
+
+The other actions were timed on a slower 4-core Linux machine, on an 11-minute test video with a
+face in view 60% of the time and a whole body in view 36% of the time (far more than in these
+episodes): the pose model took 95 s, then sitting 1 s, smiling 20 s (of which 16 s was the face
+pass, which talking then reused in 3 s), and jumping 125 s for its 230 s of extra 5-fps samples.
+Jumping's cost grows with the time whole bodies are in view, which in a sit-down show is small.

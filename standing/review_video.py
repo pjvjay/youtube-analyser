@@ -9,10 +9,15 @@ whose clips would overlap are merged into one clip. Every clip is re-encoded to 
 (640x360, 25 fps, H.264 + AAC, with silent audio where the source has none) so the clips join
 without glitches. An index CSV next to the video says where each clip starts in it.
 
+With --action (sitting, jumping, smiling, talking) it reads results/<action>/<action>_sections.csv
+(from make_report.py --action) and writes standing/output/<action>/review.mp4; there the default
+also includes sections that are not reviewed yet, since this video is how you review them.
+
 Usage (from the youtube-analyser folder):
     .venv/bin/python standing/review_video.py                         # confirmed + unclear
     .venv/bin/python standing/review_video.py --verdicts all --pad 3
     .venv/bin/python standing/review_video.py --verdicts "false alarm" --out standing/output/false_alarms.mp4
+    .venv/bin/python standing/review_video.py --action talking
 """
 import argparse
 import csv
@@ -87,15 +92,25 @@ def plan_clips(sections, pad):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sections", type=Path, default=ROOT / "results" / "standing_sections.csv")
+    ap.add_argument("--action", choices=["standing", "sitting", "jumping", "smiling", "talking"],
+                    default="standing", help="which results to use (sets the defaults below)")
+    ap.add_argument("--sections", type=Path, help="default results/standing_sections.csv, or "
+                    "results/<action>/<action>_sections.csv")
     ap.add_argument("--videos-dir", type=Path, default=ROOT, help="folder holding the downloaded videos")
-    ap.add_argument("--verdicts", default="confirmed,unclear",
-                    help='comma-separated verdicts to include, or "all"')
+    ap.add_argument("--verdicts", help='comma-separated verdicts to include, or "all" (default '
+                    '"confirmed,unclear", plus "not reviewed" for actions other than standing)')
     ap.add_argument("--pad", type=float, default=2.0, help="seconds of context before and after each section")
-    ap.add_argument("--out", type=Path, default=ROOT / "standing" / "output" / "review.mp4")
+    ap.add_argument("--out", type=Path, help="default standing/output/review.mp4, or "
+                    "standing/output/<action>/review.mp4")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     args = ap.parse_args()
+    action = args.action
+    standing = action == "standing"
+    args.sections = args.sections or (ROOT / "results" / ("standing_sections.csv" if standing else
+                                                          f"{action}/{action}_sections.csv"))
+    args.verdicts = args.verdicts or ("confirmed,unclear" if standing else "confirmed,unclear,not reviewed")
+    args.out = args.out or ROOT / "standing" / "output" / ("" if standing else action) / "review.mp4"
 
     with open(args.sections, newline="") as f:
         sections = list(csv.DictReader(f))
@@ -120,7 +135,7 @@ def main():
             verdicts = "/".join(sorted({s["verdict"] for s in c["sections"]}))
             video_id = Path(c["video"]).stem.split("_", 1)[-1]
             cap = work / f"cap{n:04d}.png"
-            caption(cap, w, f"{n}/{len(clips)}  {first['upload_date']}  {video_id}  standing {ranges}  [{verdicts}]",
+            caption(cap, w, f"{n}/{len(clips)}  {first['upload_date']}  {video_id}  {action} {ranges}  [{verdicts}]",
                     ascii_text(first["title"]))
             out = work / f"clip{n:04d}.mp4"
             dur = c["end"] - c["start"]
@@ -141,7 +156,7 @@ def main():
                 continue
             at = sum(i["clip_seconds"] for i in index)
             index.append({"clip": n, "review_at": hms(at), "video": c["video"], "title": first["title"],
-                          "standing": ranges, "verdict": verdicts, "clip_seconds": round(duration(out), 2),
+                          action: ranges, "verdict": verdicts, "clip_seconds": round(duration(out), 2),
                           "youtube": first["youtube"]})
             made.append(out)
             print(f"[{n}/{len(clips)}] {c['video']} {ranges}", flush=True)

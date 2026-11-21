@@ -1,4 +1,4 @@
-# The standing-detector API (service/app.py) as one container, for running locally or on
+# The standing (and other actions) detector API (service/app.py) as one container, for running locally or on
 # Azure Container Apps. Build from the repository root:
 #   docker build -t standing-api .
 #   docker run -p 8000:8000 -e API_KEY=change-me standing-api
@@ -15,10 +15,12 @@ COPY service/requirements.txt service/requirements.txt
 RUN pip install --no-cache-dir -r service/requirements.txt \
  && pip uninstall -y openvino-telemetry
 
-COPY standing/detect_standing.py standing/intro.py standing/
+COPY standing/detect_standing.py standing/intro.py standing/actions.py standing/
 # intro_bank.npz is built locally (standing/intro.py --build-bank) and copied when it exists;
-# the [z] wildcard keeps the build working without it.
-COPY standing/models/yolo11s-pose.onnx standing/models/intro_bank.np[z] standing/models/
+# the [z] wildcard keeps the build working without it. The two face models (2.7 MB) are for
+# action=smiling and action=talking.
+COPY standing/models/yolo11s-pose.onnx standing/models/face_landmark.onnx standing/models/face_expression.onnx \
+     standing/models/intro_bank.np[z] standing/models/
 COPY service/app.py service/
 
 ENV WORK_DIR=/tmp/standing-jobs \
