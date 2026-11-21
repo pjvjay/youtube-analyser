@@ -5,6 +5,8 @@
 *.part
 *.ytdl
 cookies.txt
+# ... except the one clip the test clips are built from (tests/README.md, "The test media")
+!tests/fixtures/sources/talker.mp4
 
 # Python, packaging, tests
 .venv/
