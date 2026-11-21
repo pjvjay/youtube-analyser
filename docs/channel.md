@@ -108,8 +108,9 @@ One run uses every core of its machine. To go faster, spread the videos over mor
 `YYYY-MM-DD`: videos outside them are skipped before downloading when the channel's listing gives
 dates or an earlier download told them, else by yt-dlp before it downloads; copies already
 downloaded are checked by the date in their name; a channel is listed newest first, so a run
-stops after 5 in a row older than `--since`; on a folder, the dates in the file names; the report
-lists only videos in the dates, whatever earlier runs searched),
+stops after 5 in a row older than `--since`, and videos newer than `--until` do not count
+towards those 5; on a folder, the dates in the file names; the report lists only videos in the
+dates, whatever earlier runs searched),
 `--shorts`, `--action` (instead of one in the query), `--config` (your people.toml),
 `--possible`, `--explain`, `--cookies cookies.txt` or `--cookies-from-browser firefox` (if
 YouTube asks you to sign in), `--yt-dlp-arg "--sleep-requests 1"` (any yt-dlp option, e.g. to go

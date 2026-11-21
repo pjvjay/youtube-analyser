@@ -137,7 +137,8 @@ def test_listing_and_downloading(fake):
     assert path.name == "20240301_newestvid01.mp4" and note == ""
     assert info == {"upload_date": "20240301", "title": 'Tab\there "quoted"', "duration": pytest.approx(2.0, abs=0.1)}
     assert yt.download(entries[0], fake / "dl", sound=True, had_sound=True)[2] == "already downloaded"
-    assert yt.download(entries[1], fake / "dl", sound=False, since="20230101") == (None, {}, "outside the dates asked for")
+    assert yt.download(entries[1], fake / "dl", sound=False, since="20230101") == (
+        None, {"upload_date": "20200101"}, "outside the dates asked for")
     (fake / "dl" / "20240301_newestvid01.f251.webm").write_bytes(b"part")
     assert youtube.find_download(fake / "dl", "newestvid01").name == "20240301_newestvid01.mp4"
 
@@ -265,8 +266,61 @@ def test_dates_hold_for_videos_downloaded_before(fake):
     assert list(done) == ["oldvideo001"]
     # yt-dlp's side: a copy already there, outside the dates asked for
     entry = {"id": "oldvideo001", "url": "https://www.youtube.com/watch?v=oldvideo001"}
-    assert yt.download(entry, fake / "w" / "videos", sound=False, since="20230101") == (None, {}, youtube.OUTSIDE_DATES)
+    assert yt.download(entry, fake / "w" / "videos", sound=False, since="20230101") == (
+        None, {"upload_date": "20200101"}, youtube.OUTSIDE_DATES)
     assert yt.download(entry, fake / "w" / "videos", sound=False, until="20211231")[2] == "already downloaded"
+
+
+def test_a_date_range_with_both_ends(fake):
+    """--since with --until on a channel listed without dates, nothing downloaded yet. A channel
+    is listed newest first, so the videos newer than --until come first: they do not count
+    towards "5 in a row older than --since", and the videos between the dates are reached. The
+    run still stops once five in a row are older than --since."""
+    clip = str(fake / "clip.mp4")
+    videos = ([{"id": f"newer{k:06d}", "title": f"Newer {k}", "upload_date": f"2025{k:02d}01", "clip": clip} for k in range(6, 0, -1)]
+              + [{"id": "september01", "title": "September", "upload_date": "20240915", "clip": clip},
+                 {"id": "march000001", "title": "March", "upload_date": "20240312", "clip": clip}]
+              + [{"id": f"older{k:06d}", "title": f"Older {k}", "upload_date": f"2023{k:02d}01", "clip": clip} for k in range(8, 0, -1)])
+    (fake / "channel.json").write_text(json.dumps({"videos": videos}))
+    said = h.Captured()
+    done, folder = channel.run_channel("https://www.youtube.com/@Fake", channel.ChannelQuery("people standing", intros="keep"),
+                                       fake / "w", youtube.YtDlp(FAKE), since="20240101", until="2024-12-31", downloads=1, ahead=1,
+                                       log=said)
+    assert sorted(done) == ["march000001", "september01"]                 # the six newer videos did not end the run
+    assert "2 of 16 videos searched" in (folder / "report.md").read_text()
+    assert "download failed" not in said.stdout                           # left out for their dates, not failures
+    assert "5 videos in a row older than --since" in said.stdout          # the older videos still end it
+    asked = [json.loads(x)[-1][-11:] for x in (fake / "calls.log").read_text().splitlines()[1:]]   # after the listing
+    assert asked[:13] == [v["id"] for v in videos[:13]]                   # six newer, two in the dates, five older
+    assert not {"older000002", "older000001"} & set(asked)                # the last ones were never asked for
+
+
+def test_a_video_left_out_for_its_date(fake):
+    """yt-dlp says nothing about a video it leaves out for its date when --print is used (and has
+    one message for too new and too old when it does speak): the date it prints first tells such
+    a video from a failed download, and which side of the dates it is on."""
+    yt = youtube.YtDlp(FAKE)
+    newest, old = yt.list("https://www.youtube.com/@Fake")
+    out = youtube.OUTSIDE_DATES
+    assert yt.download(old, fake / "dl", sound=False, since="20230101", until="20241231") == (None, {"upload_date": "20200101"}, out)
+    assert yt.download(newest, fake / "dl", sound=False, since="20210101", until="20231231") == (None, {"upload_date": "20240301"}, out)
+    # yt-dlp's own message, for someone who runs it with --no-quiet, and on its own
+    loud = youtube.YtDlp(FAKE, extra=["--no-quiet"])
+    assert loud.download(newest, fake / "dl", sound=False, until="20231231") == (None, {"upload_date": "20240301"}, out)
+    entry = {"id": "abcdefghijk", "url": "u"}
+    printing = lambda text: youtube.YtDlp([sys.executable, "-c", f"print({text!r})"])
+    message = "[download] 2025-03-01 upload date is not in range 2024-01-01 to 2024-12-31"
+    assert printing(message).download(entry, fake / "none", sound=False, since="20240101", until="20241231") == (
+        None, {"upload_date": "20250301"}, out)
+    assert printing("upload date is not in range").download(entry, fake / "none", sound=False, until="20241231") == (None, {}, out)
+    # a download that fails is still a failure, and the date printed first is not taken for the reason
+    for first in ('upload_date\t"20240601"', "upload_date\tNA", 'upload_date\t"soon"'):
+        assert printing(first).download(entry, fake / "none", sound=False, since="20240101") == (None, {}, "download failed: no file")
+    # which side: the date when it is known; without one, older only when there is no --until
+    assert youtube.older_than_since("20231231", "20240101", "20241231")
+    assert not youtube.older_than_since("20250101", "20240101", "20241231")
+    assert youtube.older_than_since(None, "20240101") and not youtube.older_than_since(None, "20240101", "20241231")
+    assert not youtube.older_than_since("20200101", None, "20241231")
 
 
 def test_dates_and_addresses():

@@ -24,6 +24,14 @@ CHANNEL_RE = re.compile(r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[^/?#]+|chan
                         r"/?(?:featured)?/?$")
 # what each download prints, as JSON values (titles can hold tabs and newlines)
 PRINTED = "after_move:%(filepath)j\t%(upload_date)j\t%(duration)j\t%(title)j"
+# ... and what yt-dlp prints for every video before its own date check: with --print it says
+# nothing about a video it leaves out for its date, so this is how one is told from a download
+# that failed, and a video too new from one too old
+DATED = "upload_date"
+PRINTED_FIRST = f"pre_process:{DATED}\t%(upload_date)j"
+# yt-dlp's own words when it does speak (--yt-dlp-arg --no-quiet): "[download] 2025-03-01 upload
+# date is not in range 2024-01-01 to 2024-12-31", the same for too new and too old
+NOT_IN_RANGE = re.compile(r"(\d{4}-?\d{2}-?\d{2}) upload date is not in range")
 
 
 OUTSIDE_DATES = "outside the dates asked for"
@@ -92,6 +100,17 @@ def in_dates(date, since=None, until=None):
     return (not since or date >= since) and (not until or date <= until)
 
 
+def older_than_since(date, since=None, until=None):
+    """Whether a video left out for its date is older than `since` (and not newer than `until`).
+    Its upload date says so when it is known; when it is not, it can only be older if no
+    `until` was asked for."""
+    if not since:
+        return False
+    if date:
+        return str(date).replace("-", "") < since
+    return not until
+
+
 def find_download(folder, vid):
     """A finished download of this video in folder (yt-dlp's YYYYMMDD_<id>.<ext>), or None."""
     for p in sorted(Path(folder).glob(f"*_{_glob_escape(vid)}.*")):
@@ -149,7 +168,8 @@ class YtDlp:
         """Download one video at the lowest resolution into folder, named YYYYMMDD_<id>.<ext>.
         A copy already there is used, unless the sound is needed now and the copy was downloaded
         without it (had_sound: it was asked for with its sound; a video with no sound at all is
-        not downloaded again and again). Returns (path or None, info, note)."""
+        not downloaded again and again). Returns (path or None, info, note); for a video outside
+        the dates the note is OUTSIDE_DATES and info holds its upload date when that is known."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         have = find_download(folder, entry["id"])
@@ -158,11 +178,11 @@ class YtDlp:
             have = None
         if have is not None:   # downloaded before, perhaps for a search with other dates
             if not in_dates(media.upload_date(have), since, until):
-                return None, {}, OUTSIDE_DATES
+                return None, {"upload_date": media.upload_date(have)}, OUTSIDE_DATES
             return have, {}, "already downloaded"
         args = ["-f", FORMAT_SOUND if sound else FORMAT_SILENT, "-o", str(folder / "%(upload_date)s_%(id)s.%(ext)s"),
                 "--no-playlist", "--no-progress", "--no-warnings", "--concurrent-fragments", "4",
-                "--no-simulate", "--print", PRINTED]
+                "--no-simulate", "--print", PRINTED, "--print", PRINTED_FIRST]
         if since:
             args += ["--dateafter", since]
         if until:
@@ -181,9 +201,28 @@ class YtDlp:
                                     "duration": float(duration) if isinstance(duration, (int, float)) else None}, ""
         have = find_download(folder, entry["id"])
         if have is not None:
-            return (have, {}, "") if in_dates(media.upload_date(have), since, until) else (None, {}, OUTSIDE_DATES)
+            if in_dates(media.upload_date(have), since, until):
+                return have, {}, ""
+            return None, {"upload_date": media.upload_date(have)}, OUTSIDE_DATES
         said = r.stdout + r.stderr
-        if "not in range" in said:
-            return None, {}, OUTSIDE_DATES
-        why = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or ["no file"])[-1]
+        refused = NOT_IN_RANGE.search(said)
+        date = _printed_date(r.stdout) or (refused.group(1).replace("-", "") if refused else None)
+        if "not in range" in said or (date and not in_dates(date, since, until)):   # no file, and its date is why
+            return None, ({"upload_date": date} if date else {}), OUTSIDE_DATES
+        printed = [line for line in r.stdout.strip().splitlines() if not line.startswith(DATED + "\t")]
+        why = (r.stderr.strip().splitlines() or printed or ["no file"])[-1]
         return None, {}, f"download failed: {why[:300]}"
+
+
+def _printed_date(stdout):
+    """The upload date (YYYYMMDD) yt-dlp printed for the video before its date check, or None."""
+    for line in stdout.splitlines():
+        name, _, value = line.partition("\t")
+        if name == DATED:
+            try:
+                date = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(date, str) and re.fullmatch(r"\d{8}", date):
+                return date
+    return None

@@ -44,7 +44,7 @@ from .analysis import Settings
 from .cloud import FileStore
 from .query import PARTS, describe_query, parse
 from .search import Searcher, slug, thumbnail
-from .youtube import OUTSIDE_DATES, YtDlp, find_download, in_dates, parse_date
+from .youtube import OUTSIDE_DATES, YtDlp, find_download, in_dates, older_than_since, parse_date
 
 try:
     import fcntl
@@ -62,7 +62,7 @@ MATCH_FIELDS = ["upload_date", "title", "video_id", "video", "person", "start_s"
 KEEP = ("video", "person", "start_s", "end_s", "start", "end", "duration_s", "action", "match", "evidence",
         "youtube", "thumb", "in_intro")
 BANK_VIDEOS = 8          # the intro bank is built from the first videos of 4 minutes or more
-TOO_OLD_IN_A_ROW = 5     # a channel is listed newest first: this many too old means the rest are too
+TOO_OLD_IN_A_ROW = 5     # a channel is listed newest first: this many older than --since means the rest are too
 REPORT_EVERY_S = 20      # the report is rewritten at most this often during a run (and at its end)
 
 
@@ -504,11 +504,14 @@ def run_channel(source, cq, work=None, yt=None, max_videos=None, since=None, unt
                 room.release()
                 log(f"[{i + 1}/{len(todo)}] {e['id']}: {note}", flush=True)
                 if note == OUTSIDE_DATES:
-                    too_old += 1
-                    if too_old >= TOO_OLD_IN_A_ROW and since and not src_dir:
-                        log(f"{TOO_OLD_IN_A_ROW} videos in a row older than --since: the rest are older still; stopping",
-                            flush=True)
-                        break
+                    # only a video older than --since says the rest are older still; one newer than
+                    # --until says nothing about the videos listed after it, and does not count
+                    if older_than_since(info.get("upload_date"), since, until):
+                        too_old += 1
+                        if too_old >= TOO_OLD_IN_A_ROW and not src_dir:
+                            log(f"{TOO_OLD_IN_A_ROW} videos in a row older than --since: the rest are older still; "
+                                "stopping", flush=True)
+                            break
                 else:
                     notes.append(f"{e['id']} {e.get('title', '')}: {note}")
                 continue   # not saved as done: a later run tries again

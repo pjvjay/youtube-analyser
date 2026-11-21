@@ -94,3 +94,10 @@ it (files made with the default settings are accepted).
 - The review video no longer mixes up the verdicts asked for with each clip's verdicts.
 - Folder stores tidy empty folders safely when two processes delete at once; Azure downloads
   create the folder they are written to.
+- `--since` together with `--until` found nothing on a channel with five or more videos newer
+  than `--until` (and no dates in its listing): the newer videos were counted towards "5 in a
+  row older than `--since`", so the run stopped before it reached the dates asked for and
+  reported "0 of N videos searched". Only videos older than `--since` count now.
+- A video that yt-dlp leaves out for its date was taken for a failed download: used with
+  `--print`, yt-dlp says nothing about such a video. yt-dlp is now asked to print each video's
+  upload date before its own date check, which also tells a video too new from one too old.
