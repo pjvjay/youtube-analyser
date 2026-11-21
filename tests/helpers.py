@@ -23,9 +23,11 @@ import actions  # noqa: E402
 import audio  # noqa: E402,F401  (for the tests: from tests.helpers import audio)
 import detect_standing as ds  # noqa: E402
 import make_fixtures as mf  # noqa: E402
+import people as characteristics  # noqa: E402  (standing/people.py; "people" is the helper below)
+import search  # noqa: E402
 
 OUT = mf.CACHE / "out"
-__all__ = ["actions", "audio", "ds", "mf", "REPO", "OUT", "run", "people", "sections", "csv_rows", "out_dir",
+__all__ = ["actions", "audio", "ds", "mf", "characteristics", "search", "REPO", "OUT", "run", "people", "sections", "csv_rows", "out_dir",
            "track_person", "overlap", "in_view", "steady"]
 
 

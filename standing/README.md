@@ -8,7 +8,8 @@ including bystanders in the background, not only the host and guest. Standing in
 The same pipeline also finds **sitting, walking, running, jumping, smiling, talking and silent**,
 chosen with `--action` (see [Other actions](#other-actions---action) below). Talking and silent use
 the sound as well as the faces, and also list who spoke when. Standing stays the default, and
-its results are unchanged.
+its results are unchanged. `search.py` finds a described person doing any of these (see
+[Finding a person](#finding-a-person-searchpy)).
 
 ## How it works
 
@@ -275,8 +276,8 @@ minutes, turns, minutes seen talking, how much of it had clear sound, and a thum
 clearest moment the voice was matched to a talking face. `review.html` shows the voices with their
 thumbnails, so you can see who A and B are. `--no-sound` judges from the faces alone.
 
-**Known gaps:** voices are per video, so the host is A in one episode and B in the next (matching
-voices across episodes would be a small next step). In the speech timeline, overlapping speech gets
+**Known gaps:** voices are per video, so the host is A in one episode and B in the next (to find
+one person's voice across episodes, enrol them by name and use `search.py`, below). In the speech timeline, overlapping speech gets
 one voice. A voice with less than about 6 s of speech (5 s of fingerprints) is merged into the
 nearest, so a bystander's few words are put under someone else's voice. A face's own voice needs
 two moments of it talking alone. A listener who laughs as clearly as talking counts as talking.
@@ -291,8 +292,102 @@ The sound and picture are assumed to be in sync (within about half a second).
 | `models/voice_embedding.onnx` (5.7 MB) | A 256-number voice fingerprint of 1.6 s of speech | Resemblyzer 0.1.4's `pretrained.pt` (GE2E speaker encoder, Apache-2.0), exported with `torch.onnx.export` with the mel filterbank (librosa's, 40 bands) built in, so it takes the power spectrum (160 frames × 201) that `audio.py` computes with numpy. Fingerprints match Resemblyzer's own to a cosine of 1.00000 |
 | `models/face_expression.onnx` (0.2 MB) | 7 expressions (angry, disgust, fear, happy, sad, surprise, neutral) from a 64×64 grey face | The mini-Xception `emotion_model.hdf5` shipped in the `fer` 25.10.3 wheel (MIT), trained on the FER2013 faces. Converted with `tf2onnx.convert.from_keras(model, input_signature=(tf.TensorSpec((None, 64, 64, 1), tf.float32, name="face"),), opset=13)`; outputs match Keras to within 4e-7. FER2013 was collected from web images for a research challenge, so check that its terms suit your use |
 
+| `models/person_mask.onnx` (0.4 MB) | Which pixels are people, from a 256×144 picture (for hair and clothes colours) | MediaPipe's selfie segmentation, landscape (`selfie_segmentation_landscape.tflite` in the `mediapipe` wheel), Apache-2.0. Converted with tf2onnx (opset 14), its custom transposed-convolution layer rewritten as a standard `ConvTranspose` plus bias; the masks match MediaPipe's own |
+| `models/gender_age.onnx` (49 MB) | How likely a 64×64 face looks female, and its apparent age (0-100) | The WideResNet from yu4u/age-gender-estimation (MIT code), weights `weights.28-3.73.hdf5` as shipped in the `py-agender` 0.0.9 wheel, rebuilt in Keras and converted with tf2onnx (opset 13), weights stored as float16 (outputs within 7e-5 of float32). **Trained on the IMDB-WIKI faces, which are released for academic research only**: check that suits your use, or switch it off in `people.toml` (`[models] gender_age = false`; apparent gender then comes from voices only, and age is not judged) |
+
 All run through OpenVINO or onnxruntime, like the pose model (`--runtime`), and give the same
 results on either (faces to within 2e-6, voices identically). No new Python packages are needed.
+
+## Finding a person (`search.py`)
+
+```bash
+.venv/bin/python standing/search.py "woman with purple hair talking" *.mp4 *.mkv *.webm
+.venv/bin/python standing/search.py "man in a blue jacket" *.mp4 --action walking
+.venv/bin/python standing/search.py "Jane smiling" *.mp4 --config my_people.toml
+```
+
+The query describes a person and, optionally, an action (any of the `--action`s above; without
+one, every time the person is in view). It can use:
+
+- **hair colour**: black, brown, blond, red, grey, white, purple, pink, blue, green (and words
+  like blonde, brunette, redhead, ginger, violet, silver, dark, light);
+- **clothes colours**, of the top (shirt, jacket, coat, dress, suit, ...) or the bottom
+  (trousers, jeans, skirt, ...), or just "in red" / "wearing blue" for either;
+- **apparent gender** (woman, man, lady, guy, ...) and **age** (young, old, grey-haired);
+- **voice**: "deep voice" or "high voice";
+- **a name** you have enrolled (below).
+
+Words it does not know are listed as ignored, so check the first line it prints (`looking for:
+gender female, hair purple; action: talking`). The words, colours and thresholds are all in
+`people.toml`; copy it, change what you need and pass it with `--config` (only what differs is
+needed). `--explain` prints what was seen of every person and why they matched or not.
+
+**How it works.** It reuses everything `detect_standing.py` saved in `--out` (the pose model's
+output, faces, sound, camera movement; whatever is missing is computed and saved) and adds one
+pass over the 1-fps samples (`appearance/<video>.npz`), so searching again, for anyone, is quick:
+
+1. **Each person's looks in each sample** (`people.py`). Hair: the person's pixels
+   (`models/person_mask.onnx`) around the head, minus the face (its outline from the face landmark
+   model) and minus anything the colour of their cheeks; only on faces with at least 10 px between
+   the eyes. Top and bottom: the person's pixels between shoulders and hips, and hips and knees.
+   Each colour is named by the nearest example in the palette (people.toml). Apparent gender and
+   age (`models/gender_age.onnx`) on faces with at least 12 px between the eyes.
+2. **People are followed through each shot**, linked from sample to sample as the walking rules
+   link them (position after the camera's own movement, size, clothes), or by their box in
+   close-ups; never across a cut. Every characteristic is then voted over all of a person's
+   samples (at least 2, and the winner at least half of them), so one bad sample does not decide.
+3. **Their voice.** For gender, voice or a name, the talking rules (above) find which voice is
+   each face's own. The voice's pitch gives "deep" (≤ 140 Hz) or "high" (≥ 155 Hz), and it
+   decides apparent gender before the face does, because at 144p it is the more reliable of the
+   two (below).
+4. **Each person is checked** against every part of the query: yes, no, or not seen well enough.
+   Everyone with all yes is a **match**; with `--possible`, people with no "no" but something unseen
+   are listed too, as **possible** (without it, the summary says how many there were).
+5. **Their action** comes from the same rules as `--action` (talking, walking, ...), per person, and
+   times they do it are joined into sections (as for the detector: gaps of up to 2 samples,
+   intros left out unless `--keep-intro`).
+
+**People by name.** Enrol someone with a stretch of video where only they talk (or a recording)
+in your people.toml:
+
+```toml
+[[people]]
+name = "Jane"
+voice_from = { video = "20240105_sampleVid01.mp4", start = 120.0, end = 150.0 }
+# or: voice_file = "jane.wav"
+describe = "woman with purple hair"      # optional: used for when she is not talking
+```
+
+A person is Jane when their own voice matches hers: a fingerprint similarity of at least 0.86
+(`same_voice_above`), and a pitch that does not rule it out. When they do not talk, `describe`
+decides instead (all of it must be seen and match). Treat a voice match as "likely", not
+certain: on meeting recordings the same speaker in two recordings scored 0.81-0.93 and different
+speakers up to 0.90. In the test clips, Jane's voice in another video scored 0.92 and the other
+voices 0.74-0.76.
+
+**Output** (`--results`, default `results/search/<query>/`): `matches.csv` (video, person, start,
+end, duration, action, match or possible, the evidence for each part of the query, YouTube link),
+`index.html` with a thumbnail of each (the person boxed) and `thumbs/`. Local only, like the other
+results.
+
+**What to expect at 144p** (from tests on faces and voices shrunk or recorded at these sizes):
+
+| Characteristic | Measured | Limits |
+|---|---|---|
+| Dyed hair (purple, green, pink, blue) | purple and green named right at 9 and 13 px between the eyes, pink and blue at 13 px | Needs a face turned to the camera; a hat or hood hides it |
+| Natural hair | approximate | Ash blond and grey come out alike, as do dark brown and black; "dark" and "light" are safer words |
+| Clothes | the blue and beige coats in the street clips named right (after adding two examples of beige in shade to the palette) | Colours shift with light and white balance: add examples to the palette from your videos (`--explain` prints what was measured) |
+| Apparent gender by face | 88-100% right on 17 test faces with 13 px or more between the eyes, 82% at 9 px | Unreliable alone: a woman in sunglasses and one with dyed purple hair came out as men. In the test clips the woman scored 0.53-0.67 and the man 0.38, so only one was decided by face. Undecided between 0.25 and 0.6 |
+| Apparent gender by voice | women 168-250 Hz, men 98-119 Hz in 12 test voices | Only for people seen talking; deep female and high male voices fall in between (not decided) |
+| Age | not measured (the test faces had no known ages) | Treat as rough; only "young" (< 30) and "old" (> 55) are searchable |
+| Names | see above | Only when they talk, or by `describe` |
+
+Gender here is the apparent gender of a face or voice, as these models estimate it, not anyone's
+identity; the words a query can use for it are in `people.toml`.
+
+Speed: the appearance pass took about 40 ms per person per sample on the 4-core test machine
+(so a few minutes per hour of a two-person interview); gender, voice and name also need the
+talking inputs (face and sound passes, shared with `--action talking`).
 
 ## Where the interview starts (`intro.py`)
 
@@ -377,6 +472,7 @@ seconds.
 | `audio/<video>.npz` | Talking, silent: speech probability every 32 ms, sound clarity per minute, and the voice of each 0.4 s of speech |
 | `camera/<video>.npz` | Walking, sitting, talking, silent, `--motion`: the camera's pan, tilt and zoom between 1-fps samples (measured 5 times a second), and the colours of each person's clothes |
 | `speech.csv`, `voices.csv`, `speech/`, `voices/` | Talking, silent: who spoke when and each video's voices (above) |
+| `appearance/<video>.npz` | `search.py`: hair and clothes colours, apparent gender and age of every person in every sample |
 | `thumbs/` | The best frame of each section, 3× enlarged |
 
 `make_report.py` turns a run into the `results/` files, adding episode titles and the verdicts
@@ -427,7 +523,7 @@ last PyTorch release for Intel Macs). The Ultralytics models and weights are lic
 
 ## Tests
 
-`tests/` has 98 tests: the decision rules on made-up measurements (seconds), standing compared
-with the original code, and walking, running, jumping and up to three people talking end to end
-on made clips whose truth is known. See [`../tests/README.md`](../tests/README.md), and
+`tests/` has 126 tests: the decision rules on made-up measurements (seconds), standing compared
+with the original code, walking, running, jumping and up to three people talking end to end
+on made clips whose truth is known, and the search for people by their looks, voice and name. See [`../tests/README.md`](../tests/README.md), and
 [`../docs/running.md`](../docs/running.md) for running everything step by step.

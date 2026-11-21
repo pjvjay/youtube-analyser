@@ -4,6 +4,9 @@
 !standing/intro.py
 !standing/actions.py
 !standing/audio.py
+!standing/people.py
+!standing/search.py
+!standing/people.toml
 !standing/models/intro_bank.npz
 !standing/requirements.txt
 !standing/models/yolo11s-pose.onnx
@@ -11,5 +14,7 @@
 !standing/models/face_expression.onnx
 !standing/models/voice_activity.onnx
 !standing/models/voice_embedding.onnx
+!standing/models/person_mask.onnx
+!standing/models/gender_age.onnx
 !service/app.py
 !service/requirements.txt

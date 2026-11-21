@@ -938,8 +938,31 @@ def cached(path, valid, make, force=False):
         if valid(saved):
             return saved, False
     data = make()
+    path.parent.mkdir(parents=True, exist_ok=True)
     save_npz(path, data)
     return data, True
+
+
+def load_camera(v, poses, args):
+    """camera_input() for one video, from camera/<video>.npz in --out when still valid."""
+    (args.out / "camera").mkdir(parents=True, exist_ok=True)
+    return cached(args.out / "camera" / f"{v.stem}.npz",
+                  lambda d: int(d["poses_t"]) == len(poses["t"]) and "steps" in d
+                  and int(d.get("camera_version", 0)) == actions.CAMERA_VERSION,
+                  lambda: camera_input(v, poses), args.force)[0]
+
+
+def load_poses(v, args, model):
+    """The pose model's output for one video, from poses/<video>.npz in --out, or run (model:
+    a PoseModel, or a function that loads one). Returns (poses, how)."""
+    pose_file = args.out / "poses" / f"{v.stem}.npz"
+    if pose_file.exists() and not args.force:
+        return dict(np.load(pose_file)), "saved poses"
+    pose_file.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    poses = infer(v, model if isinstance(model, PoseModel) else model(), args.fps, args.conf)
+    save_npz(pose_file, poses)
+    return poses, f"{1000 * (time.perf_counter() - started) / max(len(poses['t']), 1):.0f} ms/frame"
 
 
 def load_input(v, poses, args, models):
@@ -957,10 +980,7 @@ def load_input(v, poses, args, models):
         return d
 
     def camera():
-        return cached(out / "camera" / f"{v.stem}.npz",
-                      lambda d: int(d["poses_t"]) == len(poses["t"]) and "steps" in d
-                      and int(d.get("camera_version", 0)) == actions.CAMERA_VERSION,
-                      lambda: camera_input(v, poses), args.force)[0]
+        return load_camera(v, poses, args)
 
     if action in DENSE_ACTIONS:
         extra, made = cached(out / "poses" / f"{v.stem}.dense.npz",
@@ -974,8 +994,9 @@ def load_input(v, poses, args, models):
     elif action in SOUND_ACTIONS:
         sound = None
         if not args.no_sound:
-            sound, made = cached(out / "audio" / f"{v.stem}.npz", lambda d: True, lambda: sound_input(v, models),
-                                 args.force)
+            sound, made = cached(out / "audio" / f"{v.stem}.npz",
+                                 lambda d: not bool(d["has_sound"]) or "voice_f0" in d,  # older files lack pitch
+                                 lambda: sound_input(v, models), args.force)
             if not bool(sound["has_sound"]):
                 sound = None
             if made:
@@ -1052,20 +1073,13 @@ def main():
     # yt-dlp leaves unmerged format files such as X.f278.webm next to X.webm; skip those.
     videos = [v for v in args.videos if not re.search(r"\.f\d+$", v.stem)]
     for i, v in enumerate(videos, 1):
-        pose_file = args.out / "poses" / f"{v.stem}.npz"
         done = (out_dir / "segments" / f"{v.stem}.csv").exists()
         if done and not (args.reclassify or args.force):
             print(f"[{i}/{len(videos)}] {v.name}: done already, skipping", flush=True)
             continue
         started = time.perf_counter()
         try:
-            if pose_file.exists() and not args.force:
-                poses = dict(np.load(pose_file))
-                how = "saved poses"
-            else:
-                poses = infer(v, model("pose"), args.fps, args.conf)
-                save_npz(pose_file, poses)
-                how = f"{1000 * (time.perf_counter() - started) / max(len(poses['t']), 1):.0f} ms/frame"
+            poses, how = load_poses(v, args, models["pose"])
             extra, more = load_input(v, poses, args, models)
             n_frames, n_segments, n_dropped, n_intro, start = analyse(v, poses, args, out_dir, bank, extra)
         except Exception as e:  # keep going on a bad file; it stays unmarked and is retried next run

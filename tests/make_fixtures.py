@@ -24,7 +24,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 SOURCES = ROOT / "fixtures" / "sources"
-VERSION = 7                                 # bump when a clip changes: cached clips and results are rebuilt
+VERSION = 9                                 # bump when a clip changes: cached clips and results are rebuilt
 CACHE = ROOT / ".cache" / f"v{VERSION}"
 CLIPS = CACHE / "clips"
 W, H, FPS = 256, 144, 25
@@ -301,12 +301,13 @@ def _speech():
     return out
 
 
-def _sound(script, seconds, noise_db=None):
+def _sound(script, seconds, noise_db=None, start=None):
     """The sound for a script: each speaker's speech where they talk (taking their recording in
-    order, looping), room tone throughout, and optionally crowd babble noise_db below the voices."""
+    order from start[voice] seconds, looping), room tone throughout, and optionally crowd babble
+    noise_db below the voices."""
     rng = np.random.default_rng(2)
     speech = _speech()
-    pos = {k: 0 for k in speech}
+    pos = {k: int((start or {}).get(k, 0) * SR) for k in speech}
     out = rng.normal(0, 0.0005, int(seconds * SR)).astype(np.float32)
     for t0, t1, who in script:
         for voice in who.values():
@@ -366,6 +367,141 @@ def _cutaways(seconds, shot=6):
 CUTAWAYS = [(k * 6, k * 6 + 6, {"X" if k % 2 == 0 else "Y": "a" if k % 2 == 0 else "b"}) for k in range(6)]
 
 
+# ---- people with characteristics: a woman (hair natural, purple or blue) and a man, talking --------
+
+# Each clip: seconds, the people in their seats ({seat: (who, hair)}), who talks when with which
+# voice, and where each voice's recording starts (so two clips do not share the same sentences).
+# Voice c (FEE083) is "Jane": enrolled from duo_purple, and heard again in solo_blue.
+CHARACTERS = {
+    "duo_purple": (36, {"left": ("woman", "purple"), "right": ("man", None)},
+                   [(0, 8, {"left": "c"}), (8, 16, {"right": "b"}), (16, 20, {}), (20, 28, {"left": "c"}),
+                    (28, 36, {"right": "b"})], {"c": 0.0, "b": 0.0}),
+    "duo_natural": (36, {"left": ("woman", "natural"), "right": ("man", None)},
+                    [(0, 8, {"left": "a"}), (8, 16, {"right": "d"}), (16, 20, {}), (20, 28, {"left": "a"}),
+                     (28, 36, {"right": "d"})], {"a": 0.0, "d": 0.0}),
+    "solo_blue": (24, {"centre": ("woman", "blue")},
+                  [(0, 8, {"centre": "c"}), (8, 12, {}), (12, 20, {"centre": "c"}), (20, 24, {})], {"c": 17.0}),
+}
+SEAT_X = {"left": 0, "right": 128, "centre": 64}
+TILE = 128
+
+
+def _woman():
+    """The astronaut portrait with her hair mask and mouth (found with the project's own models),
+    and functions to dye her hair and open her mouth."""
+    sys.path.insert(0, str(ROOT.parent / "standing"))
+    import actions as A
+    import detect_standing as ds
+    import people as P
+    img = cv2.imread(str(SOURCES / "astronaut.jpg"))
+    pose = ds.PoseModel(ds.DEFAULT_MODEL, 640, runtime="onnxruntime")
+    looks = P.AppearanceModels("onnxruntime", gender_age=False)
+    conf, boxes, kps = pose(img, 0.35)
+    kp, box = kps[int(np.argmax(conf))], boxes[int(np.argmax(conf))]
+    geo = A.face_geometry(kp)
+    oval, _ = looks.face_outline(img, geo)
+    h, w = img.shape[:2]
+    face = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(face, [np.round(oval).astype(np.int32)], 1)
+    face = cv2.dilate(face, np.ones((5, 5), np.uint8), iterations=2) > 0
+    fx0, fx1 = oval[:, 0].min(), oval[:, 0].max()
+    fw = fx1 - fx0
+    yy, xx = np.mgrid[0:h, 0:w]
+    zone = (xx > fx0 - 0.6 * fw) & (xx < fx1 + 0.6 * fw) & (yy >= box[1] - 5) & (yy < oval[P.CHIN][1] - 0.1 * fw)
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    hairish = (lab[:, :, 2] - 128 > 8) & (lab[:, :, 0] > 40) & (lab[:, :, 0] < 200)   # her warm light-brown hair
+    hair = zone & ~face & looks.person_mask(img) & hairish
+    hair = cv2.morphologyEx(hair.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
+    # the mouth, from the face landmarks back in the picture
+    mid, d, ang = geo
+    centre = A._below(mid, d, ang, 0.6)
+    m = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, 192 / (4 * d))
+    m[:, 2] += np.array([96, 96]) - centre
+    lm, _, _ = looks.faces.face(img, geo)
+    back = cv2.invertAffineTransform(m)
+    lm = lm @ back[:, :2].T + back[:, 2]
+    top, lip, chin = lm[13][1], lm[14][1], lm[152][1]                         # inner lips, chin
+    mx, half = (lm[61][0] + lm[291][0]) / 2, abs(lm[291][0] - lm[61][0]) / 2
+
+    def dye(hue, chroma=45, light=0.75):
+        lab2 = lab.copy()
+        soft = cv2.GaussianBlur(hair.astype(np.float32), (0, 0), 1.5)
+        lab2[:, :, 0] *= 1 - soft * (1 - light)
+        lab2[:, :, 1] = lab2[:, :, 1] * (1 - soft) + (128 + chroma * np.cos(np.radians(hue))) * soft
+        lab2[:, :, 2] = lab2[:, :, 2] * (1 - soft) + (128 + chroma * np.sin(np.radians(hue))) * soft
+        return cv2.cvtColor(np.clip(lab2, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+    wx = np.exp(-((xx - mx) / (1.6 * half)) ** 2)
+    below = np.clip((yy - lip) / 2.0, 0, 1)                                   # nothing moves above the lower lip
+    fade = np.clip(1 - (yy - chin) / (0.6 * (chin - lip)), 0, 1)              # still again under the chin
+
+    # her smile shows her teeth, which the face model reads as a slightly open mouth: at rest the
+    # teeth are covered with lip colour (lips closed), and talking opens a dark mouth under them
+    lips = np.zeros((h, w), np.float32)
+    cv2.ellipse(lips, (int(mx), int((top + lip) / 2)), (int(0.9 * half), max(1, int((lip - top) / 2) + 1)), 0, 0, 360, 1, -1)
+    lips = cv2.GaussianBlur(lips, (0, 0), 1.0)[:, :, None]
+    upper = (abs(xx - mx) < 0.5 * half) & (yy > lm[0][1]) & (yy < top - 1)
+    lip_colour = np.median(img[upper], axis=0)
+
+    def talking(src, opening):
+        """Her mouth opened by opening (0-1): the lower lip and chin move down, showing the dark
+        inside of her mouth."""
+        out = (src * (1 - lips) + lip_colour * lips).astype(np.uint8)
+        drop = 1.2 * opening * (chin - lip)
+        if drop < 1:
+            return out
+        dy = drop * wx * below * fade
+        out = cv2.remap(out, xx.astype(np.float32), (yy - dy).astype(np.float32), cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_REFLECT)
+        inside = np.zeros((h, w), np.float32)
+        cv2.ellipse(inside, (int(mx), int((top + lip + drop) / 2)), (int(0.75 * half), int((lip + drop - top) / 2)),
+                    0, 0, 360, 1, -1)
+        inside = cv2.GaussianBlur(inside, (0, 0), 1.5)[:, :, None]
+        return (out * (1 - inside) + np.array([35, 30, 70]) * inside).astype(np.uint8)
+    variants = {"natural": img, "purple": dye(320), "blue": dye(290)}
+    return variants, talking
+
+
+def _mouth(script, seconds, seat, start):
+    """How far open a woman's mouth is (0-1) at each frame: the loudness of her own voice, so her
+    syllables and pauses are seen as well as heard."""
+    own = [(a, b, {k: v for k, v in who.items() if k == seat}) for a, b, who in script]
+    wav = _sound(own, seconds, start=start)
+    hop = SR // FPS
+    rms = np.sqrt(np.convolve(wav ** 2, np.ones(int(0.06 * SR)) / int(0.06 * SR), "same"))[::hop][:int(seconds * FPS)]
+    # each syllable opens it wide and it closes between them: loudness against the loudest in the
+    # surrounding 0.6 s
+    peak = np.array([rms[max(0, i - 7):i + 8].max() for i in range(len(rms))])
+    ratio = np.where(peak > 0.01, rms / np.maximum(peak, 1e-6), 0.0)
+    return np.clip((ratio - 0.3) / 0.4, 0, 1)
+
+
+def _characters(name):
+    seconds, seats, script, start = CHARACTERS[name]
+    talk, still = _talker_frames()
+    mouths = {seat: _mouth(script, seconds, seat, start) for seat, (who, _) in seats.items() if who == "woman"}
+    women = _woman() if any(who == "woman" for who, _ in seats.values()) else None
+    man_tile = lambda f: cv2.resize(f[0:144, 16:160], (TILE, TILE), interpolation=cv2.INTER_AREA)
+    frames = []
+    for i in range(int(seconds * FPS)):
+        t = i / FPS
+        who = next((w for a, b, w in script if a <= t < b), {})
+        img = np.full((H, W, 3), 45, np.uint8)
+        for k, (seat, (person, hair)) in enumerate(seats.items()):
+            if person == "man":
+                tile = man_tile(talk[(i + 11) % len(talk)] if seat in who else still)
+            else:
+                variants, talking = women
+                opening = mouths[seat][i] if seat in who else 0.0
+                tile = cv2.resize(talking(variants[hair], opening)[20:280, 50:310], (TILE, TILE), interpolation=cv2.INTER_AREA)
+            dx, dy = np.sin(t * 1.1 + k), np.cos(t * 0.7 + k)   # a little sway
+            tile = cv2.warpAffine(tile, np.float32([[1, 0, dx], [0, 1, dy]]), (TILE, TILE), borderMode=cv2.BORDER_REFLECT)
+            x0 = SEAT_X[seat]
+            img[8:8 + TILE, x0:x0 + TILE] = tile
+        frames.append(img)
+    return frames
+
+
 # ---- building --------------------------------------------------------------------------------
 
 def path(name):
@@ -392,6 +528,9 @@ def build(name, force=False):
     elif name == "cutaways":
         seconds = CUTAWAYS[-1][1]
         _write(out, _cutaways(seconds), _sound(CUTAWAYS, seconds))
+    elif name in CHARACTERS:
+        seconds, _, script, start = CHARACTERS[name]
+        _write(out, _characters(name), _sound(script, seconds, start=start))
     elif name.startswith("voices_"):  # sound only, with a still picture
         script, seconds, noise = VOICE_CLIPS[name]
         _write(out, [np.full((H, W, 3), 60, np.uint8)] * int(seconds * FPS), _sound(script, seconds, noise))
@@ -427,7 +566,8 @@ VOICE_CLIPS = {  # name -> (script, seconds, babble dB below the voices or None)
                            + _shift(_turns(["a", "b"], 20, _rng), 43), 63, None),
 }
 
-ALL = list(MOVEMENT) + ["three_talkers", "three_talkers_noisy", "three_talkers_no_sound", "cutaways"] + list(VOICE_CLIPS)
+ALL = list(MOVEMENT) + ["three_talkers", "three_talkers_noisy", "three_talkers_no_sound", "cutaways"] + list(VOICE_CLIPS) \
+    + list(CHARACTERS)
 
 
 def main():

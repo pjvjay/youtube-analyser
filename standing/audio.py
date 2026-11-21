@@ -21,6 +21,9 @@ Used by the talking and silent actions (see actions.py for how it is combined wi
    (median; mean 4.7%) under the wrong voice; on 30-60 s clips of real 2-4 person meetings,
    where turns are short and overlap, 13.9%.
 5. Voices are named A, B, C... in order of how long they speak, separately for each video.
+6. Each voice's characteristics are kept for describing and finding people (people.py): its
+   median pitch (women in the test recordings spoke at 168-250 Hz, men at 98-119 Hz) and its
+   mean fingerprint, which finds the same voice in other videos.
 """
 import json
 import subprocess
@@ -234,16 +237,33 @@ def _distinct(E, lab, min_windows=3):
     return lab
 
 
-def analyse(wav, models):
-    """Speech and voices of one video's sound. Returns the arrays saved in audio/<video>.npz."""
-    p = models.speech_prob(wav)
-    m = speech_mask(p)
+def speech_windows(wav, m):
+    """Start (in samples) of every fingerprint window that is mostly speech (m: speech_mask)."""
     win = int(EMB_WIN_S * SR)
     starts = np.arange(0, len(wav) - win + 1, int(EMB_STEP_S * SR))
     a = (starts / HOP).astype(int)
     b = ((starts + win) / HOP).astype(int)
     cum = np.r_[0, np.cumsum(m)]
-    starts = starts[(cum[np.minimum(b, len(m))] - cum[np.minimum(a, len(m))]) >= EMB_MIN_SPEECH * (b - a)]
+    return starts[(cum[np.minimum(b, len(m))] - cum[np.minimum(a, len(m))]) >= EMB_MIN_SPEECH * (b - a)]
+
+
+def voice_print(wav, models):
+    """(fingerprint, pitch) of one person's voice from a recording of them alone (its speech
+    windows' fingerprints averaged, as analyse() does for each voice of a video), or None with
+    under a window of speech."""
+    starts = speech_windows(wav, speech_mask(models.speech_prob(wav)))
+    if not len(starts):
+        return None
+    c = models.fingerprints(wav, starts).mean(0)
+    return c / (np.linalg.norm(c) + 1e-9), median_pitch(wav, starts)
+
+
+def analyse(wav, models):
+    """Speech and voices of one video's sound. Returns the arrays saved in audio/<video>.npz."""
+    p = models.speech_prob(wav)
+    m = speech_mask(p)
+    win = int(EMB_WIN_S * SR)
+    starts = speech_windows(wav, m)
     E = models.fingerprints(wav, starts)
     centres = (starts + win / 2) / SR
     voice = np.zeros(len(E), int)
@@ -260,11 +280,49 @@ def analyse(wav, models):
         voice = np.stack([pad[i:i + len(S)] for i in range(SMOOTH_WINDOWS)]).mean(0).argmax(1)
         order = np.argsort(-np.bincount(voice, minlength=len(C)))  # A speaks most
         voice = np.argsort(order)[voice]
+    k = int(voice.max()) + 1 if len(E) else 0
+    centroid = np.zeros((k, E.shape[1] if len(E) else 256), np.float32)
+    f0 = np.full(k, np.nan, np.float32)
+    for v in range(k):
+        c = E[voice == v].mean(0)
+        centroid[v] = c / (np.linalg.norm(c) + 1e-9)
+        f0[v] = median_pitch(wav, starts[voice == v])
     return {"speech_prob": p.astype(np.float16), "speech": m, "snr_db": snr_db(wav, p),
             "win_t": centres.astype(np.float32), "win_voice": voice.astype(np.int8),
             "voices": np.int32(len(np.unique(voice)) if len(E) else 0),
             "margin": np.float32(margin), "most_alike": np.float32(most_alike),
-            "duration": np.float32(len(wav) / SR)}
+            "duration": np.float32(len(wav) / SR), "voice_f0": f0, "voice_centroid": centroid}
+
+
+PITCH_FRAME, PITCH_HOP = 640, 320     # 40 ms frames every 20 ms
+PITCH_RANGE = (60, 400)               # Hz: from a deep man's voice to a child's
+PITCH_VOICED = 0.5                    # autocorrelation peak that counts as voiced
+PITCH_MAX_FRAMES = 2000
+
+
+def median_pitch(wav, starts):
+    """Median pitch (Hz) of the voiced frames inside windows starting at these sample offsets
+    (autocorrelation; at most PITCH_MAX_FRAMES frames); NaN if none is voiced."""
+    offsets = np.unique(np.concatenate([s + np.arange(0, int(EMB_WIN_S * SR) - PITCH_FRAME, PITCH_HOP)
+                                        for s in starts])) if len(starts) else np.zeros(0, int)
+    if len(offsets) > PITCH_MAX_FRAMES:
+        offsets = offsets[np.linspace(0, len(offsets) - 1, PITCH_MAX_FRAMES).astype(int)]
+    offsets = offsets[offsets + PITCH_FRAME <= len(wav)]
+    if not len(offsets):
+        return np.nan
+    x = wav[offsets[:, None] + np.arange(PITCH_FRAME)[None, :]].astype(np.float64)
+    x -= x.mean(1, keepdims=True)
+    loud = np.sqrt((x ** 2).mean(1)) >= 1e-3
+    x = x[loud]
+    if not len(x):
+        return np.nan
+    spec = np.fft.rfft(x, n=2 * PITCH_FRAME)
+    ac = np.fft.irfft(np.abs(spec) ** 2)[:, :PITCH_FRAME]
+    ac /= ac[:, :1] + 1e-12
+    lo, hi = int(SR / PITCH_RANGE[1]), int(SR / PITCH_RANGE[0])
+    lag = lo + np.argmax(ac[:, lo:hi], axis=1)
+    voiced = ac[np.arange(len(ac)), lag] > PITCH_VOICED
+    return float(np.median(SR / lag[voiced])) if voiced.any() else np.nan
 
 
 def voice_name(k):

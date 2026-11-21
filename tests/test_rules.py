@@ -12,7 +12,7 @@ import unittest
 import numpy as np
 import cv2
 
-from tests.helpers import actions, audio, mf
+from tests.helpers import actions, audio, characteristics, mf, search
 
 SOURCES = mf.SOURCES
 
@@ -475,6 +475,205 @@ class Sound(unittest.TestCase):
             wav[a:a + audio.SR] += 0.05 * np.sin(np.arange(audio.SR) * 0.3).astype(np.float32)
             p[a // audio.HOP:(a + audio.SR) // audio.HOP] = 0.9
         self.assertEqual(len(audio.snr_db(wav, p)), 1)
+
+
+# ---- people's characteristics and the search ------------------------------------------------
+
+CONFIG = characteristics.load_config()
+
+
+def person(**kw):
+    """A characteristics.summarise() result: nothing seen unless given."""
+    p = {"gender": None, "gender_by": "", "faces": 0, "age": None, "hair": (None, 0.0, 0), "top": (None, 0.0, 0),
+         "bottom": (None, 0.0, 0), "voice": None, "voice_f0": None, "voice_name": None,
+         "first_t": 0.0, "last_t": 9.0, "detections": np.arange(10)}
+    p.update(kw)
+    return p
+
+
+class Colours(unittest.TestCase):
+    def test_each_palette_example_is_named_as_itself(self):
+        for kind in ("hair", "clothes"):
+            for name, protos in CONFIG["colours"][kind].items():
+                for lab in protos:
+                    self.assertEqual(characteristics.colour_name(lab, CONFIG["colours"][kind])[0], name, (kind, lab))
+
+    def test_measured_colours(self):
+        hair, clothes = CONFIG["colours"]["hair"], CONFIG["colours"]["clothes"]
+        # measured on the test clips (medians over a person): dyed and natural hair, the man's hair,
+        # the blue and the beige coat in the street
+        self.assertEqual(characteristics.colour_name(np.float32([79, 156, 107]), hair)[0], "purple")
+        self.assertEqual(characteristics.colour_name(np.float32([102, 130, 151]), hair)[0], "brown")
+        self.assertEqual(characteristics.colour_name(np.float32([50, 130, 137]), hair)[0], "black")
+        self.assertEqual(characteristics.colour_name(np.float32([98, 137, 91]), clothes)[0], "blue")
+        self.assertEqual(characteristics.colour_name(np.float32([140, 134, 144]), clothes)[0], "beige")   # in shade
+
+    def test_a_users_file_is_laid_over_the_defaults(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write('[look]\nmin_samples = 5\n[colours.hair]\nteal = ["#2a7f7f"]\n'
+                    '[[people]]\nname = "Jane"\nvoice_file = "jane.wav"\n')
+        c = characteristics.load_config(f.name)
+        self.assertEqual(c["look"]["min_samples"], 5)
+        self.assertEqual(c["look"]["min_share"], CONFIG["look"]["min_share"])   # the rest kept
+        self.assertIn("teal", c["colours"]["hair"])
+        self.assertIn("purple", c["colours"]["hair"])
+        self.assertEqual(c["people"][0]["name"], "Jane")
+
+
+class Queries(unittest.TestCase):
+    def parse(self, q, names=()):
+        r = search.parse(q, CONFIG, names)
+        return {k: v for k, v in r.items() if v}
+
+    def test_the_asked_for_example(self):
+        self.assertEqual(self.parse("woman with purple hair talking"),
+                         {"gender": "female", "hair": {"purple"}, "action": "talking"})
+
+    def test_phrasings(self):
+        blue = {"blue", "navy", "light blue"}
+        cases = {
+            "purple-haired woman": {"gender": "female", "hair": {"purple"}},
+            "a lady with violet hair smiling": {"gender": "female", "hair": {"purple"}, "action": "smiling"},
+            "blonde man in a blue coat walking": {"gender": "male", "hair": {"blond"}, "top": blue, "action": "walking"},
+            "man wearing red": {"gender": "male", "clothes": {"red"}},
+            "someone with dark hair sitting": {"hair": {"black", "brown"}, "action": "sitting"},
+            "redhead jumping": {"hair": {"red"}, "action": "jumping"},
+            "grey-haired man": {"gender": "male", "age": "old", "hair": {"grey", "white"}},
+            "young woman in a light blue shirt": {"gender": "female", "age": "young", "top": {"light blue"}},
+            "man in black trousers and a white shirt": {"gender": "male", "bottom": {"black"}, "top": {"white"}},
+            "person with a deep voice talking": {"voice": "low", "action": "talking"},
+            "high-pitched voice": {"voice": "high"},
+            "woman in green running": {"gender": "female", "clothes": {"green"}, "action": "running"},
+        }
+        for q, want in cases.items():
+            self.assertEqual(self.parse(q), want, q)
+
+    def test_names_and_unknown_words(self):
+        self.assertEqual(self.parse("Jane talking", ["Jane"]), {"name": "Jane", "action": "talking"})
+        self.assertEqual(self.parse("Mary Ann smiling", ["Mary Ann"]), {"name": "Mary Ann", "action": "smiling"})
+        self.assertEqual(self.parse("man with a beard dancing"), {"gender": "male", "ignored": ["beard", "dancing"]})
+
+
+class Verdicts(unittest.TestCase):
+    req = staticmethod(lambda q, names=(): search.parse(q, CONFIG, names))
+
+    def test_match_possible_no(self):
+        q = self.req("woman with purple hair")
+        seen = person(gender="female", gender_by="voice", hair=("purple", 0.9, 20))
+        self.assertEqual(search.check(seen, q, CONFIG)[0], "match")
+        self.assertEqual(search.check(person(gender="female", gender_by="voice"), q, CONFIG)[0], "possible")
+        self.assertEqual(search.check(dict(seen, gender="male"), q, CONFIG)[0], "no")
+        self.assertEqual(search.check(dict(seen, hair=("blue", 0.9, 20)), q, CONFIG)[0], "no")
+        # a colour seen in under min_share of the samples is not decided
+        self.assertEqual(search.check(dict(seen, hair=("purple", 0.4, 20)), q, CONFIG)[0], "possible")
+
+    def test_clothes_either_top_or_bottom(self):
+        q = self.req("man wearing red")
+        self.assertEqual(search.check(person(gender="male", top=("white", 1, 5), bottom=("red", 1, 5)), q, CONFIG)[0], "match")
+        self.assertEqual(search.check(person(gender="male", top=("white", 1, 5)), q, CONFIG)[0], "no")
+
+    def test_voice_pitch(self):
+        q = self.req("deep voice")
+        self.assertEqual(search.check(person(voice=0, voice_f0=110.0), q, CONFIG)[0], "match")
+        self.assertEqual(search.check(person(voice=0, voice_f0=200.0), q, CONFIG)[0], "no")
+        self.assertEqual(search.check(person(voice=0, voice_f0=147.0), q, CONFIG)[0], "no")   # in between
+        self.assertEqual(search.check(person(), q, CONFIG)[0], "possible")                   # never heard
+
+    def test_a_name_by_voice_or_by_description(self):
+        q = self.req("Jane", ["Jane"])
+        self.assertEqual(search.check(person(voice=1, voice_name="Jane"), q, CONFIG)[0], "match")
+        self.assertEqual(search.check(person(voice=1, voice_name=None), q, CONFIG)[0], "no")
+        silent = person(gender="female", gender_by="face", hair=("purple", 1.0, 9))
+        self.assertEqual(search.check(silent, q, CONFIG)[0], "possible")
+        described = self.req("woman with purple hair")
+        self.assertEqual(search.check(silent, q, CONFIG, described)[0], "match")
+        self.assertEqual(search.check(dict(silent, hair=("black", 1.0, 9)), q, CONFIG, described)[0], "possible")
+
+    def test_the_voice_decides_gender_before_the_face(self):
+        g = lambda f0, female: characteristics._gender({"voice_f0": f0, "female": female}, CONFIG)
+        self.assertEqual(g(210.0, 0.1), ("female", "voice"))   # a woman the face model took for a man
+        self.assertEqual(g(105.0, 0.9), ("male", "voice"))
+        self.assertEqual(g(None, 0.8), ("female", "face"))
+        self.assertEqual(g(None, 0.1), ("male", "face"))
+        self.assertEqual(g(None, 0.4), (None, ""))             # the face does not decide
+        self.assertEqual(g(147.0, 0.8), ("female", "face"))    # a pitch in between does not either
+
+    def test_characteristics_are_voted_over_a_track(self):
+        n = 6
+        look = {k: np.full((n, 3), np.nan, np.float32) for k in ("hair", "top", "bottom")}
+        look.update({k: np.full(n, np.nan, np.float32) for k in ("female", "age", "eyes")})
+        purple, blue = CONFIG["colours"]["hair"]["purple"][2], CONFIG["colours"]["hair"]["blue"][1]
+        look["hair"][:] = [purple, purple, purple, blue, purple, purple]
+        look["female"][:3] = [0.8, 0.7, 0.9]
+        poses = poses_of([[body(100)]] * 3 + [[body(200)]] * 3)
+        track = np.array([0, 0, 0, 1, 1, 1])
+        s = characteristics.summarise(poses, track, look, CONFIG)
+        self.assertEqual(s[0]["hair"], ("purple", 1.0, 3))
+        self.assertEqual(s[1]["hair"][0], "purple")
+        self.assertAlmostEqual(s[1]["hair"][1], 2 / 3)
+        self.assertEqual((s[0]["gender"], s[0]["gender_by"]), ("female", "face"))
+        self.assertIsNone(s[1]["gender"])                       # no face seen
+        s = characteristics.summarise(poses, track, look, CONFIG, own_voice={4: 1, 5: 1},
+                             voices={"f0": np.array([200.0, 110.0]), "names": {1: "Bob"}})
+        self.assertEqual((s[1]["voice_f0"], s[1]["voice_name"], s[1]["gender"]), (110.0, "Bob", "male"))
+
+
+class Tracks(unittest.TestCase):
+    def test_two_people_crossing_keep_their_tracks(self):
+        frames = [[body(60 + 25 * f), body(200 - 25 * f)] for f in range(6)]
+        poses = poses_of(frames)
+        looks = [[50.0] * 24 if k == 0 else [150.0] * 24 for f in range(6) for k in range(2)]
+        track = characteristics.tracks(poses, camera_of(poses, looks=looks), np.array(looks, np.float32))
+        self.assertEqual(sorted(set(track[0::2])), [track[0]])
+        self.assertEqual(sorted(set(track[1::2])), [track[1]])
+        self.assertNotEqual(track[0], track[1])
+
+    def test_too_far_a_cut_and_a_long_gap_start_new_tracks(self):
+        poses = poses_of([[body(40)], [body(40 + 5 * TORSO)]])     # 5 torso lengths in a second
+        self.assertEqual(len(set(characteristics.tracks(poses))), 2)
+        poses = poses_of([[body(100)], [body(102)], [body(104)]])
+        self.assertEqual(len(set(characteristics.tracks(poses, camera_of(poses, response=[0, 1, 0.01])))), 2)   # a cut before the third
+        poses = poses_of([[body(100)], [], [body(101)], [], [], [body(102)]])
+        track = characteristics.tracks(poses)
+        self.assertEqual(track[0], track[1])      # one sample missed
+        self.assertNotEqual(track[1], track[2])   # two missed
+
+    def test_close_ups_follow_the_box_and_the_camera(self):
+        def face_only(x):
+            kp, _ = body(x)
+            kp[11:, 2] = 0.0                       # nothing below the shoulders
+            return kp, np.array([x - 30, 10, 60, 130], np.float32)
+        poses = poses_of([[face_only(60), face_only(190)] for _ in range(4)])
+        track = characteristics.tracks(poses)
+        self.assertEqual(len(set(track)), 2)
+        # the camera pans 60 px right: the people move 60 px left in the picture, and are followed
+        poses = poses_of([[face_only(100 - 60 * f)] for f in range(2)])
+        self.assertEqual(len(set(characteristics.tracks(poses))), 2)
+        self.assertEqual(len(set(characteristics.tracks(poses, camera_of(poses, shift=[[0, 0], [-60, 0]])))), 1)
+
+
+class Voices(unittest.TestCase):
+    def test_pitch_of_tones(self):
+        t = np.arange(3 * audio.SR) / audio.SR
+        starts = np.arange(0, len(t) - int(audio.EMB_WIN_S * audio.SR), int(audio.EMB_STEP_S * audio.SR))
+        for f0 in (110.0, 210.0):
+            wav = sum(np.sin(2 * np.pi * k * f0 * t) / k for k in range(1, 6)).astype(np.float32) * 0.1
+            self.assertAlmostEqual(audio.median_pitch(wav, starts), f0, delta=0.03 * f0)
+        self.assertTrue(np.isnan(audio.median_pitch(np.zeros_like(t, np.float32), starts)))
+
+    def test_naming_voices(self):
+        rng = np.random.default_rng(0)
+        jane = rng.normal(size=256)
+        jane /= np.linalg.norm(jane)
+        other = rng.normal(size=256)
+        other /= np.linalg.norm(other)
+        near = jane + 0.2 * other
+        near /= np.linalg.norm(near)                          # similarity 0.98
+        enrolled = {"Jane": (jane, 200.0)}
+        cents = np.stack([near, other, near])
+        names = characteristics.name_voices(cents, np.array([190.0, 120.0, 110.0]), enrolled, CONFIG)
+        self.assertEqual(names, {0: "Jane"})                   # the third sounds alike, but is low
 
 
 if __name__ == "__main__":

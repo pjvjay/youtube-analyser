@@ -12,6 +12,7 @@ from real rows.
 | `results/standing_sections.csv` | `results/standing_sections.csv` | `make_report.py`: standing during the interviews, with verdicts |
 | `results/outside_interview.csv` | `results/outside_interview.csv` | `make_report.py`: standing in the intros, and sections marked `after the interview` |
 | `results/interview_starts.csv` | `results/interview_starts.csv` | `make_report.py`, from `intro.py`: where each video's interview starts and how it was found (`title`, `angles`, `shared`, `short video`) |
+| `results/search/<query>/matches.csv` | `results/search/<query>/matches.csv` | `search.py`: each time a described person does the action. `person` numbers the people followed in that video; `match` is `match`, or `possible` with `--possible` (something was not seen well enough); `evidence` lists each part of the query with what was seen and `[yes]`, `[no]` or `[unknown]` |
 
 For the other actions (`make_report.py --action sitting|walking|running|jumping|smiling|talking|silent`) the same files
 are written to `results/<action>/`, with `<action>_sections.csv` in place of

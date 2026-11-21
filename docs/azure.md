@@ -11,9 +11,10 @@ It runs locally today and runs unchanged as an Azure Container App:
 
 | Call | Does |
 |---|---|
-| `POST /jobs?name=<file>&action=<action>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id`. `action` is `standing` (default), `sitting`, `walking`, `running`, `jumping`, `smiling`, `talking` or `silent` |
+| `POST /jobs?name=<file>&action=<action>` with the video as the body | Saves it to the container's local disk, queues it, returns `job_id`. `action` is `standing` (default), `sitting`, `walking`, `running`, `jumping`, `smiling`, `talking` or `silent`. Add `who=<description>` (for example `who=woman with purple hair talking`) to find that person instead |
 | `GET /jobs/{job_id}` | `queued`, `processing`, `done` or `failed`, plus `interview_start_s`, `intro_sections` and `video_deleted` |
 | `GET /jobs/{job_id}/sections.csv` | `start_s, end_s, start, end, duration_s, standing_frames, max_people_standing` (for another action, `<action>_frames, max_people_<action>`), for the interview only (the intro is left out) |
+| `GET /jobs/{job_id}/matches.csv` | With `who=`: `person, start_s, end_s, start, end, duration_s, action, match, evidence` |
 | `GET /jobs/{job_id}/speech.csv` | Talking and silent: who spoke when (voices A, B... from the sound), whether they were on screen, and whether the sound was clear enough to trust |
 | `DELETE /jobs/{job_id}` | Forgets the job and its result |
 
@@ -100,7 +101,8 @@ for the camera's movement (about 2 minutes per hour of video, a fifth of the pos
 face pass, about 20% more when a face is in view most of the time, and talking and silent the
 camera pass and about 35 s per hour of sound for the speech and voices. Running and jumping run the
 pose model again at 5 fps, but only around moments where a whole body is in view, which in a
-sit-down show is a small part of each episode. Each job runs the pose model itself, so asking for two actions on the same
+sit-down show is a small part of each episode. A `who=` job adds an appearance pass (about 40 ms
+per person per sample), and for gender, voice or a name the talking inputs. Each job runs the pose model itself, so asking for two actions on the same
 video means two jobs and twice the cost; the command line shares the pose model's output
 between actions instead.
 
@@ -146,5 +148,5 @@ az containerapp create -n standing-api -g standing-rg --environment standing-env
 Note: Azure Container Registry Basic has its own monthly fee. To keep the bill to compute
 only, push the image to GitHub Container Registry instead and point `--image` there. Public
 images there are free, and a private image counts against your GitHub Packages storage
-allowance. The image is 1.68 GB (Python, ffmpeg, OpenVINO, OpenCV), so check your plan.
+allowance. The image was 1.68 GB (Python, ffmpeg, OpenVINO, OpenCV) before the search's 50 MB of models were added, so check your plan.
 Before making it public, note that the bundled Ultralytics model is AGPL-3.0.

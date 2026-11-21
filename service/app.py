@@ -3,6 +3,11 @@
 Other actions work the same way: add action=sitting, walking, running, jumping, smiling, talking
 or silent to the upload (default standing; see standing/detect_standing.py, actions.py and audio.py).
 
+To look for a particular person, add who=<description> (as standing/search.py takes it, e.g.
+who=woman with purple hair talking): the result is then matches.csv, the times that person does
+the action (from the description, or action=; without either, whenever they are in view).
+People to find by name are enrolled in the PEOPLE_CONFIG file (voice_file recordings).
+
 The uploaded video only exists on local disk while it waits and is processed. It is deleted
 as soon as it has been analysed, whether the job succeeded or failed, and any videos
 left over from a crash are deleted at startup. Results are a few hundred bytes of CSV held in
@@ -13,6 +18,8 @@ memory until DELETE or until RESULT_TTL_S after the job finished.
     GET    /jobs/{job_id}/sections.csv   sections from the interview start on
     GET    /jobs/{job_id}/speech.csv     talking and silent: who spoke when (voices A, B... from the
                                          sound) and whether they were on screen, for the whole video
+    GET    /jobs/{job_id}/matches.csv    with who=: person, start_s, end_s, start, end, duration_s,
+                                         action, match, evidence
     DELETE /jobs/{job_id}
     GET    /healthz
 
@@ -27,12 +34,15 @@ standing/intro.py --build-bank; without it each whole video is treated as the in
 
 Settings (environment): API_KEY (when set, callers must send it in the x-api-key header),
 WORK_DIR, MAX_UPLOAD_MB (default 2048), RESULT_TTL_S (default 3600), MODEL, IMGSZ (default
-640), FPS (default 1), JUMP_FPS (default 5: running and jumping's extra samples where a whole body is in view).
+640), FPS (default 1), JUMP_FPS (default 5: running and jumping's extra samples where a whole body is in view),
+PEOPLE_CONFIG (your people.toml for who=, merged over standing/people.toml).
 
 Run locally from the youtube-analyser folder:
     .venv/bin/uvicorn service.app:app --port 8000
     curl -X POST --data-binary @video.mp4 "http://localhost:8000/jobs?name=video.mp4"
     curl -X POST --data-binary @video.mp4 "http://localhost:8000/jobs?name=video.mp4&action=talking"
+    curl -X POST --data-binary @video.mp4 "http://localhost:8000/jobs?name=video.mp4" \
+        --url-query "who=woman with purple hair talking"
 """
 import csv
 import io
@@ -47,11 +57,14 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "standing"))
 import detect_standing as ds  # noqa: E402
+import people  # noqa: E402
+import search  # noqa: E402
 
 API_KEY = os.environ.get("API_KEY", "")
 WORK_DIR = Path(os.environ.get("WORK_DIR", Path(tempfile.gettempdir()) / "standing-jobs"))
@@ -62,6 +75,7 @@ IMGSZ = int(os.environ.get("IMGSZ", "640"))
 FPS = float(os.environ.get("FPS", "1"))
 JUMP_FPS = float(os.environ.get("JUMP_FPS", str(ds.actions.JUMP_FPS)))
 CONF = 0.35  # the command line's default; sections use each action's default rules, as it does
+PEOPLE_CONFIG = os.environ.get("PEOPLE_CONFIG") or None
 
 
 def csv_fields(action):
@@ -70,9 +84,10 @@ def csv_fields(action):
 
 
 SPEECH_FIELDS = [f for f in ds.SPEECH_FIELDS if f not in ("video", "youtube")]
-STATUS_FIELDS = ["job_id", "name", "action", "status", "size_mb", "created", "started", "finished",
-                 "frames", "interview_start_s", "sections", "intro_sections", "still_figures_dropped",
-                 "voices", "sound_trusted", "error", "video_deleted"]
+MATCH_FIELDS = ["person", "start_s", "end_s", "start", "end", "duration_s", "action", "match", "evidence"]
+STATUS_FIELDS = ["job_id", "name", "action", "who", "looking_for", "status", "size_mb", "created", "started",
+                 "finished", "frames", "interview_start_s", "sections", "intro_sections", "still_figures_dropped",
+                 "voices", "sound_trusted", "matches", "error", "video_deleted"]
 
 jobs = {}  # job_id -> job dict; only touched under `lock`
 lock = threading.Lock()
@@ -89,7 +104,9 @@ def run_jobs():
             if job:
                 job.update(status="processing", started=time.time())
         try:
-            if job:
+            if job and job["who"]:
+                find_person(job, path)
+            elif job:
                 action, rules = job["action"], ds.ACTIONS[job["action"]]
                 poses = ds.infer(path, state["model"], FPS, CONF)
                 if not len(poses["t"]):
@@ -118,6 +135,35 @@ def run_jobs():
             with lock:
                 if job:
                     job.update(finished=time.time(), video_deleted=not path.exists())
+
+
+def find_person(job, path):
+    """A who= job: search.py's search of one video, its saved model output in a folder that is
+    deleted with the video."""
+    req = dict(job["req"])
+    action = req["action"]
+    with tempfile.TemporaryDirectory(dir=WORK_DIR) as tmp:
+        args = search.options(tmp, fps=FPS, conf=CONF, jump_fps=JUMP_FPS, imgsz=IMGSZ, model=Path(MODEL),
+                              possible=job["possible"])
+        models = {"pose": state["model"], "faces": face_models, "voices": voice_models,
+                  "appearance": appearance_models}
+        searcher = search.Searcher(args, state["people"], models, bank=state["bank"])
+        searcher.enrolled = state.setdefault("enrolled", None)
+        rows = searcher.search(path, req, action)
+        state["enrolled"] = searcher.enrolled  # the enrolled voices are the same for every job
+        frames = len(np.load(Path(tmp) / "poses" / f"{path.stem}.npz")["t"])
+    if not frames:
+        raise ValueError("no video frames could be decoded")
+    start = searcher.interview_start(path)
+    with lock:
+        job.update(status="done", matches_csv=to_csv(MATCH_FIELDS, rows), matches=len(rows),
+                   frames=frames, interview_start_s=start)
+
+
+def appearance_models():
+    if "appearance" not in state:
+        state["appearance"] = people.AppearanceModels(gender_age=state["people"]["models"]["gender_age"])
+    return state["appearance"]
 
 
 def face_models():
@@ -159,6 +205,7 @@ async def lifespan(app):
         leftover.unlink(missing_ok=True)
     state["model"] = ds.PoseModel(MODEL, IMGSZ)
     state["bank"] = ds.intro.load_bank()
+    state["people"] = people.load_config(PEOPLE_CONFIG)
     if state["bank"] is None:
         print("no intro bank: the intro is not separated", file=sys.stderr)
     threading.Thread(target=run_jobs, daemon=True).start()
@@ -183,11 +230,23 @@ def get_job(job_id):
 
 
 @app.post("/jobs", status_code=202)
-async def create_job(request: Request, name: str = "video", action: str = "standing",
-                     x_api_key: str | None = Header(default=None)):
+async def create_job(request: Request, name: str = "video", action: str | None = None, who: str = "",
+                     possible: bool = False, x_api_key: str | None = Header(default=None)):
     check_key(x_api_key)
-    if action not in ds.ACTIONS:
+    req = None
+    if who.strip():
+        config = state["people"]
+        req = search.parse(who, config, [p["name"] for p in config.get("people", [])])
+        if action not in (None, *ds.ACTIONS, "visible"):
+            raise HTTPException(400, f"action must be one of: {', '.join(ds.ACTIONS)}, visible")
+        req["action"] = action or req["action"] or "visible"
+        if not any(req[k] for k in search.PARTS):
+            raise HTTPException(400, "who= describes nobody: " + (f"ignored words {', '.join(req['ignored'])}; "
+                                if req["ignored"] else "") + "see standing/people.toml for the words it knows")
+        action = req["action"]
+    elif (action or "standing") not in ds.ACTIONS:
         raise HTTPException(400, f"action must be one of: {', '.join(ds.ACTIONS)}")
+    action = action or "standing"
     job_id = uuid.uuid4().hex
     path = WORK_DIR / f"{job_id}.video"
     size = 0
@@ -204,14 +263,18 @@ async def create_job(request: Request, name: str = "video", action: str = "stand
         path.unlink(missing_ok=True)
         raise
     with lock:
-        jobs[job_id] = {"job_id": job_id, "name": name[:200], "action": action, "status": "queued",
+        jobs[job_id] = {"job_id": job_id, "name": name[:200], "action": action, "who": who[:200] if req else None,
+                        "looking_for": None if req is None else search.describe_query(req)
+                        + (f" (ignored: {', '.join(req['ignored'])})" if req["ignored"] else ""),
+                        "req": req, "possible": possible, "matches": None, "matches_csv": None, "status": "queued",
                         "size_mb": round(size / 1e6, 1), "created": time.time(), "started": None,
                         "finished": None, "frames": None, "interview_start_s": None, "sections": None,
                         "intro_sections": None, "still_figures_dropped": None, "voices": None,
                         "sound_trusted": None, "error": None, "video_deleted": False, "csv": None,
                         "speech_csv": None}
     work.put((job_id, path))
-    return {"job_id": job_id, "status_url": f"/jobs/{job_id}", "result_url": f"/jobs/{job_id}/sections.csv"}
+    return {"job_id": job_id, "status_url": f"/jobs/{job_id}",
+            "result_url": f"/jobs/{job_id}/{'matches' if req else 'sections'}.csv"}
 
 
 @app.get("/jobs/{job_id}")
@@ -225,6 +288,8 @@ def job_status(job_id: str, x_api_key: str | None = Header(default=None)):
 def job_result(job_id: str, x_api_key: str | None = Header(default=None)):
     check_key(x_api_key)
     job = get_job(job_id)
+    if job["who"]:
+        raise HTTPException(404, "this job looked for a person (who=): its result is matches.csv")
     if job["status"] != "done":
         raise HTTPException(409, f"job is {job['status']}" + (f": {job['error']}" if job["error"] else ""))
     return PlainTextResponse(job["csv"], media_type="text/csv")
@@ -234,11 +299,22 @@ def job_result(job_id: str, x_api_key: str | None = Header(default=None)):
 def job_speech(job_id: str, x_api_key: str | None = Header(default=None)):
     check_key(x_api_key)
     job = get_job(job_id)
-    if job["action"] not in ds.SOUND_ACTIONS:
-        raise HTTPException(404, "speech.csv is made for action=talking and action=silent")
+    if job["action"] not in ds.SOUND_ACTIONS or job["who"]:
+        raise HTTPException(404, "speech.csv is made for action=talking and action=silent (without who=)")
     if job["status"] != "done":
         raise HTTPException(409, f"job is {job['status']}" + (f": {job['error']}" if job["error"] else ""))
     return PlainTextResponse(job["speech_csv"], media_type="text/csv")
+
+
+@app.get("/jobs/{job_id}/matches.csv")
+def job_matches(job_id: str, x_api_key: str | None = Header(default=None)):
+    check_key(x_api_key)
+    job = get_job(job_id)
+    if not job["who"]:
+        raise HTTPException(404, "matches.csv is made for jobs with who=")
+    if job["status"] != "done":
+        raise HTTPException(409, f"job is {job['status']}" + (f": {job['error']}" if job["error"] else ""))
+    return PlainTextResponse(job["matches_csv"], media_type="text/csv")
 
 
 @app.delete("/jobs/{job_id}", status_code=204)
@@ -253,4 +329,5 @@ def delete_job(job_id: str, x_api_key: str | None = Header(default=None)):
 def healthz():
     return {"ok": True, "queued": work.qsize(), "runtime": state["model"].runtime,
             "model": Path(MODEL).name, "imgsz": IMGSZ, "fps": FPS, "jump_fps": JUMP_FPS,
-            "actions": list(ds.ACTIONS), "intro_bank": state["bank"] is not None}
+            "actions": list(ds.ACTIONS), "intro_bank": state["bank"] is not None,
+            "people_enrolled": [p["name"] for p in state["people"].get("people", [])]}

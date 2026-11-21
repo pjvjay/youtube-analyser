@@ -116,6 +116,54 @@ changes). One thing to know about times: a 1-per-second sample labelled `t` show
 about half a second later (ffmpeg keeps the last frame of each second); sections use the
 labels, as standing always has.
 
+## 4b. Find a particular person doing an action
+
+```bash
+.venv/bin/python standing/search.py "woman with purple hair talking" *.mp4 *.mkv *.webm
+```
+
+It prints what it understood first, then one line per video and a total, for example:
+
+```
+looking for: gender female, hair purple; action: talking
+[1/248] 20240105_sampleVid01.mp4: 2 results
+...
+14 results (14 matches) -> results/search/woman-with-purple-hair-talking/matches.csv, .../index.html
+3 more people might match (not seen well enough to tell); --possible lists them, --explain says why
+```
+
+Check the `looking for:` line: any word it did not understand is listed as `ignored words`
+(say, "beard" or "glasses", which it cannot see). The words it knows are in
+`standing/people.toml`. The search reuses `standing/output/` (run it with the same `--out` as the
+detector, the default) and computes and saves whatever is missing, so the first search over new
+videos runs the pose model (and, for voice, gender or a name, the face and sound passes that
+`--action talking` uses); later searches take seconds per video.
+
+Then open `results/search/<query>/index.html`: one thumbnail per result with the person boxed,
+the evidence for each part of the query (`hair purple (100% of 36) [yes]`) and a YouTube link.
+
+Options: `--action` (instead of an action in the query; `visible` for any time they are in view),
+`--possible` (also list people who might match: some part not seen, such as hair on a small face),
+`--explain` (print what was seen of every person), `--config my_people.toml`, `--keep-intro`,
+`--out`, `--results`.
+
+**To find someone by name**, enrol their voice: copy `standing/people.toml` to, say,
+`my_people.toml`, keep only what you change, and add
+
+```toml
+[[people]]
+name = "Jane"
+voice_from = { video = "20240105_sampleVid01.mp4", start = 120.0, end = 150.0 }   # only she talks here
+describe = "woman with purple hair"                                                # optional
+```
+
+then `search.py "Jane talking" *.mp4 --config my_people.toml`. Pick 20-30 s where only she
+speaks. A voice match is "likely", not certain (see `standing/README.md`), so check the results.
+
+**If it finds the wrong colours**, run with `--explain` to see what was measured (`top grey (80%
+of 10)`), and add an example of the colour from your videos to the palette in your copy of
+`people.toml` (colours are `#rrggbb`; a new name becomes a word you can search for).
+
 ## 5. Review and report
 
 1. Open `standing/output/<action>/review.html` in a browser: one thumbnail per section, with
@@ -149,11 +197,19 @@ curl -H "x-api-key: change-me" -X POST --data-binary @episode.mp4 "http://localh
 curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>                 # queued | processing | done | failed
 curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>/sections.csv
 curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>/speech.csv      # talking and silent
+curl -H "x-api-key: change-me" -X POST --data-binary @episode.mp4 "http://localhost:8000/jobs?name=episode.mp4" \
+     --url-query "who=woman with purple hair talking"
+curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>/matches.csv     # with who=
 curl -H "x-api-key: change-me" -X DELETE http://localhost:8000/jobs/<job_id>
 ```
 
-`action` is any of the actions above (default standing). The uploaded video is deleted as soon
-as it has been analysed. As a container:
+`action` is any of the actions above (default standing). With `who=` (a description, as for
+`search.py`) the job finds that person instead and its result is `matches.csv`; the action comes
+from the description or `action=` (default: whenever they are in view), `possible=true` adds
+possible matches, and people to find by name are enrolled in the file `PEOPLE_CONFIG` points to
+(use `voice_file` recordings there; the server has no other videos). The status shows what was
+understood (`looking_for`). The uploaded video, and everything computed from it, is deleted as
+soon as it has been analysed. As a container:
 
 ```bash
 docker build -t standing-api .
@@ -172,7 +228,7 @@ See [`docs/azure.md`](azure.md) for running it on Azure.
 ```
 
 The first full run builds the test clips (`tests/make_fixtures.py`) and runs the detector on
-them, about 10 minutes on a 4-core machine; later runs reuse both and take a few minutes. Delete
+them, 5-10 minutes on a 4-core machine; later runs reuse both and take a few minutes. Delete
 `tests/.cache/` to start from nothing. [`tests/README.md`](../tests/README.md) lists what each test
 checks and where the test media come from.
 
@@ -188,6 +244,8 @@ checks and where the test media come from.
 | Talking says `sound trusted 0% of the time` | The background is too loud (crowd, music): talking falls back to the faces, voices are unreliable |
 | Nothing found for walking, running or jumping | They need people's shoulders and hips (running and jumping: their whole body) in view: close-ups are never judged |
 | A change of thresholds has no effect | Run again with `--reclassify` (done videos are otherwise skipped) |
+| A search finds nobody | Run it with `--explain`: each person's hair, clothes, gender and voice as seen. Faces too small for hair (under 10 px between the eyes) or gender (12 px) are "not seen": add `--possible`. Gender by voice needs them seen talking |
+| A search lists ignored words | Those words are not in `standing/people.toml`; rephrase, or add them there (`[words]`) |
 | Tests fail after editing the clips | Bump `VERSION` in `tests/make_fixtures.py` so the clips and results are rebuilt |
 
 ## 9. A full run, in order
@@ -199,5 +257,7 @@ checks and where the test media come from.
    write verdicts (step 5). The new actions have not been checked on real episodes yet, so do
    this before trusting their counts.
 5. `make_report.py` (with `--action`) for each action.
-6. After changing a threshold in `standing/actions.py` or `standing/audio.py`, run the tests
-   (step 7) and then `detect_standing.py ... --reclassify` for that action.
+6. `search.py` for the people you are looking for (step 4b); check the thumbnails.
+7. After changing a threshold in `standing/actions.py` or `standing/audio.py`, run the tests
+   (step 7) and then `detect_standing.py ... --reclassify` for that action. Changes to
+   `people.toml` take effect on the next search.

@@ -12,11 +12,12 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from tests import helpers as h
-from tests.helpers import REPO, ds, mf
+from tests.helpers import REPO, ds, mf, search
 
 ACTIONS = list(ds.ACTIONS)
 CLIPS = {"standing": ["walk_stop_walk"], "sitting": ["walk_stop_walk"], "walking": ["walk_stop_walk"],
@@ -110,7 +111,12 @@ class Service(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.port = _free_port()
-        env = dict(os.environ, API_KEY="test-key", WORK_DIR=str(Path(cls.tmp.name) / "work"))
+        # Jane's voice, enrolled from a recording of her (0-8 s of duo_purple), for who=Jane
+        jane = Path(cls.tmp.name) / "jane.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(mf.build("duo_purple")), "-t", "8", "-vn", str(jane)], check=True)
+        config = Path(cls.tmp.name) / "people.toml"
+        config.write_text(f'[[people]]\nname = "Jane"\nvoice_file = "{jane}"\n')
+        env = dict(os.environ, API_KEY="test-key", WORK_DIR=str(Path(cls.tmp.name) / "work"), PEOPLE_CONFIG=str(config))
         cls.server = subprocess.Popen([sys.executable, "-m", "uvicorn", "service.app:app", "--port", str(cls.port)],
                                       cwd=REPO, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(120):
@@ -134,8 +140,9 @@ class Service(unittest.TestCase):
             data = r.read()
             return data if r.headers.get_content_type() == "text/csv" else json.loads(data)
 
-    def job(self, name, action):
-        job = self.call("POST", f"/jobs?name={name}.mp4&action={action}", mf.build(name).read_bytes())
+    def job(self, name, action, who=None):
+        query = f"action={action}" if who is None else urllib.parse.urlencode({"who": who})
+        job = self.call("POST", f"/jobs?name={name}.mp4&{query}", mf.build(name).read_bytes())
         for _ in range(600):
             status = self.call("GET", f"/jobs/{job['job_id']}")
             if status["status"] in ("done", "failed"):
@@ -168,6 +175,27 @@ class Service(unittest.TestCase):
                 self.assertGreater(len(speech.splitlines()), 3)
                 self.assertEqual(status["voices"], 3)
         self.assertEqual(list((Path(self.tmp.name) / "work").glob("*")), [])   # every upload deleted
+
+    def test_finding_a_person(self):
+        job_id, status = self.job("duo_purple", None, who="woman with purple hair talking")
+        self.assertEqual(status["status"], "done", status)
+        self.assertEqual((status["action"], status["looking_for"]), ("talking", "gender female, hair purple"))
+        got = list(csv.DictReader(self.call("GET", f"/jobs/{job_id}/matches.csv").decode().splitlines()))
+        searcher = search.Searcher(search.options(h.OUT, keep_intro=True), search.people.load_config())
+        req = search.parse("woman with purple hair talking", searcher.config)
+        want = searcher.search(mf.path("duo_purple"), req, "talking")
+        self.assertEqual([(float(r["start_s"]), float(r["end_s"])) for r in got], [(r["start_s"], r["end_s"]) for r in want])
+        self.assertEqual(len(got), 2)
+        # Jane, enrolled from a recording (PEOPLE_CONFIG), found by her voice in another video
+        job_id, status = self.job("solo_blue", None, who="Jane talking")
+        self.assertEqual(status["status"], "done", status)
+        got = list(csv.DictReader(self.call("GET", f"/jobs/{job_id}/matches.csv").decode().splitlines()))
+        self.assertEqual(len(got), 2)
+        self.assertIn("voice of Jane", got[0]["evidence"])
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.call("POST", "/jobs?name=x.mp4&who=wibble", b"x")
+        self.assertEqual(e.exception.code, 400)
+        self.assertEqual(list((Path(self.tmp.name) / "work").glob("*")), [])
 
 
 if __name__ == "__main__":
