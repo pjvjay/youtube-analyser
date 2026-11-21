@@ -4,6 +4,7 @@ yt-dlp's listings and downloads (with a stand-in), the report writer, queries an
     pytest tests/test_units.py
 """
 import json
+import shlex
 import subprocess
 import sys
 
@@ -14,7 +15,7 @@ from tests import helpers as h
 from youtube_analyser import audio, channel, intro, media, people, query, youtube
 from youtube_analyser.cloud import FileStore
 
-FAKE = f"{sys.executable} {h.REPO / 'tests' / 'fake_yt_dlp.py'}"
+FAKE = shlex.join([sys.executable, str(h.REPO / "tests" / "fake_yt_dlp.py")])   # quoted: the path may hold spaces
 
 
 def test_names_and_links():

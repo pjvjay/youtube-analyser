@@ -11,6 +11,7 @@ resuming, failures, the report and its links).
 import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ def tearDownModule():
     state["tmp"].cleanup()
 
 
-FAKE = f"{sys.executable} {h.REPO / 'tests' / 'fake_yt_dlp.py'}"
+FAKE = shlex.join([sys.executable, str(h.REPO / "tests" / "fake_yt_dlp.py")])   # quoted: the path may hold spaces
 
 
 def channel(query, work, *options, source=URL, fail=""):

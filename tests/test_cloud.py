@@ -6,6 +6,7 @@ emulator (see conftest.py).
 """
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -18,7 +19,7 @@ from youtube_analyser import channel, cloud, jobs
 from youtube_analyser.cloud import azure as az
 from youtube_analyser.youtube import YtDlp
 
-FAKE = f"{sys.executable} {h.REPO / 'tests' / 'fake_yt_dlp.py'}"
+FAKE = shlex.join([sys.executable, str(h.REPO / "tests" / "fake_yt_dlp.py")])   # quoted: the path may hold spaces
 
 
 def name():
