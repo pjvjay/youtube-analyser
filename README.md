@@ -1,71 +1,115 @@
 # youtube-analyser
 
-Finds every time range in which someone is standing during the interviews in a folder of
-downloaded episodes of a sit-down interview show (each episode's intro is found automatically
-and left out), and offers the same detector as an upload API that deletes each video as soon as
-it has been analysed.
+A Python package (`youtube_analyser`, command `yta`) that finds people doing things in YouTube
+videos, cheaply, at the lowest resolution (144p):
 
-**Results** are written locally to `results/` and are not committed, because they name the
-videos. [`samples/`](samples/README.md) shows every results file with a few made-up rows. On the
-test set (248 videos, 210 hours) the detector reported 92 standing sections during the
-interviews, and a manual review found 77 confirmed, 6 unclear and 9 false alarms; 27 sections
-in intros (nearly all title sequences) were left out automatically.
+- **Actions** (`yta detect`): every time range in which someone is **standing**, **sitting**,
+  **walking**, **running**, **jumping**, **smiling**, **talking** or **silent**, in a folder of
+  downloaded episodes of a sit-down interview show. Each episode's intro is found automatically
+  and set apart; talking and silent combine the faces with the sound, and also list who spoke when.
+- **A described person** (`yta search`): "woman with purple hair talking", "man in a blue coat
+  walking", "someone with a deep voice", or someone enrolled by name (found by their voice).
+- **A whole channel in one command** (`yta channel`): from the channel's address to a report with
+  a link to each moment found. It downloads the videos at 144p while it analyses the ones already
+  downloaded, computes only what the query needs, and rules most videos out in seconds with a
+  quick look at their keyframes.
+- **An upload API** (`yta serve`) and **workers** (`yta worker`) that run the same pipeline on one
+  machine or in the cloud (Azure Blob and Queue Storage, or any provider plugged in), deleting
+  each video as soon as it has been analysed.
+
+On the original test set (248 videos, 210 hours) the standing detector reported 92 standing
+sections during the interviews; a manual review found 77 confirmed, 6 unclear and 9 false
+alarms, and 27 sections in intros (nearly all title sequences) were set apart automatically.
+The other actions and the search are tested end to end on made clips with known truth, not yet
+on real episodes: review their first results by eye before relying on them.
+
+## Install
+
+Python 3.11 or later (tested on 3.11 and 3.12), and ffmpeg with ffprobe (5.1 or later; tested
+with 6.1) on the PATH. The models come with the package.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[all]"                 # or pick extras: openvino, service, azure, youtube
+pip uninstall -y openvino-telemetry     # OpenVINO otherwise sends a usage event on every import
+```
+
+`pip install -e .` alone is the command line on onnxruntime. The extras: `openvino` (about 1.4-1.8x
+faster on Intel CPUs), `service` (the HTTP API), `azure` (Blob and Queue Storage), `youtube`
+(yt-dlp, for `yta channel`; keep it up to date with `pip install -U yt-dlp`), and `dev` (the
+tests). `pip wheel .` builds a wheel with the models inside (about 70 MB).
+
+## Quick start
+
+```bash
+yta detect *.mp4 --action talking                       # -> output/talking/segments.csv, review.html
+yta search "woman with purple hair talking" *.mp4        # -> results/search/<query>/matches.csv, index.html
+yta channel "https://www.youtube.com/@SomeShow" "people jumping"
+yta channel "https://www.youtube.com/@SomeShow" "woman with purple hair talking" --max-videos 50
+                                                         # -> channels/<channel>/searches/<query>/report.html
+API_KEY=change-me yta serve                              # the HTTP API on port 8000
+```
+
+From Python:
+
+```python
+from pathlib import Path
+from youtube_analyser import Searcher, load_people, parse_query
+
+config = load_people()
+searcher = Searcher(config, cache="output")              # model output is saved and reused
+for r in searcher.search(Path("20240105_sampleVid01.mp4"), parse_query("man talking", config)):
+    print(r["start"], r["end"], r["youtube"], r["evidence"])
+```
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/running.md](docs/running.md) | **Step by step**: setup, downloading, each action, reviewing, reports, searching, the API, the tests, troubleshooting |
+| [docs/actions.md](docs/actions.md) | How each action is found, what it misses, what was measured, the files written, the models used |
+| [docs/search.md](docs/search.md) | Searching for a described person: the words a query can use, how people are matched, what to expect at 144p, enrolling people by name |
+| [docs/channel.md](docs/channel.md) | Searching a whole channel: what it does, speed (measured), options, more machines |
+| [docs/api.md](docs/api.md) | The HTTP API: calls, errors, settings, privacy |
+| [docs/cloud.md](docs/cloud.md) | The cloud framework (swappable stores and queues, workers), Azure set-ups and costs, adding a provider |
+| [docs/development.md](docs/development.md) | How the code is organised, the tests and coverage, building |
+| [tests/README.md](tests/README.md) | What each test checks, the made test clips and where their media come from |
+| [samples/README.md](samples/README.md) | The format of every results file, with made-up rows |
 
 ## What is where
 
 | Path | What |
 |---|---|
-| `standing/detect_standing.py` | The detector: ffmpeg samples frames, a YOLO pose model finds body points, leg-geometry rules decide standing / sitting / unknown, still figures are dropped. [README](standing/README.md) |
-| `standing/intro.py` | Finds where each episode's interview starts, after the teaser, title sequence and ads, by matching title footage shared across episodes |
-| `standing/make_report.py` | Turns a detector run plus `results/verdicts.csv` into the results files |
-| `standing/review_video.py` | Joins every standing section into one captioned video to watch (`standing/output/review.mp4`) |
-| `standing/models/` | The pose models (ONNX, exported from Ultralytics YOLO11; AGPL-3.0) |
-| `service/app.py` | HTTP API: upload a video, get a CSV of standing sections in the interview back; the video is deleted after processing |
-| `Dockerfile` | The API as one container (ffmpeg, OpenVINO, model) for local use or Azure Container Apps |
-| `docs/azure.md` | Running it on Azure so you pay only for compute, with costs |
-| `samples/` | The format of the local-only files, with made-up names |
+| `src/youtube_analyser/` | The package ([development.md](docs/development.md) has a map of its modules) |
+| `src/youtube_analyser/assets/` | The models (ONNX) and the default `people.toml` (the search's words, colours and thresholds) |
+| `tests/` | The tests (pytest), the clip maker and the test media |
+| `docs/`, `samples/` | Documentation, and made-up examples of every results file |
+| `Dockerfile` | One image for the API and the workers (ffmpeg, OpenVINO, the models) |
 
 **Kept locally, not in this repository** (see `.gitignore`): the videos, the yt-dlp
 `cookies.txt` and download archive, the video inventory (`analysis/`), the results and manual
-review (`results/`), the detector's output (`standing/output/`), and the bank of title frames
-(`standing/models/intro_bank.npz`), which is made from the videos.
-
-## Quick start
-
-```bash
-/usr/local/bin/python3.12 -m venv .venv
-.venv/bin/pip install -r service/requirements.txt
-.venv/bin/pip uninstall -y openvino-telemetry
-```
-
-The last line removes OpenVINO's telemetry package, which otherwise sends a usage event to
-Google Analytics on every import.
-
-Build the bank of title frames from your episodes (once, and again after a new season), find
-standing sections, then build the report:
-
-```bash
-.venv/bin/python standing/intro.py --build-bank *.mp4 *.mkv *.webm
-.venv/bin/python standing/detect_standing.py *.mp4 *.mkv *.webm --out standing/output
-.venv/bin/python standing/make_report.py
-```
-
-Without a bank the detector still runs, but treats each whole video as the interview.
-
-Run the API and send it a video:
-
-```bash
-API_KEY=change-me .venv/bin/uvicorn service.app:app --port 8000
-curl -H "x-api-key: change-me" -X POST --data-binary @episode.mp4 "http://localhost:8000/jobs?name=episode.mp4"
-curl -H "x-api-key: change-me" http://localhost:8000/jobs/<job_id>/sections.csv
-```
-
-Or as a container: `docker build -t standing-api .` and
-`docker run -p 8000:8000 -e API_KEY=change-me standing-api`. The image includes the bank if you
-have built it locally.
+review (`results/`), the detector's output (`output/`), the channel searches (`channels/`), and
+the bank of title frames (`intro_bank.npz`), which is made from the videos.
 
 ## Speed
 
-At 1 frame per second, input size 640, on a 4-core Intel Mac with OpenVINO: about 51 ms per
-frame, so 100 hours of video take about 5 hours on this machine. In a 2-vCPU container a
-63-minute episode took 8.9 minutes. See [`docs/azure.md`](docs/azure.md) for cloud costs.
+At 1 frame per second, input size 640, on a 4-core Intel Mac with OpenVINO: about 51 ms per frame
+for the pose model, so 100 hours of video take about 5 hours for standing. In a 2-vCPU container
+a 63-minute episode took 8.9 minutes. The other actions cost little on top (the pose model's
+output is shared; see [actions.md](docs/actions.md)), and a channel search for someone who is in
+few videos ran at 115-230x real time after the quick look ([channel.md](docs/channel.md#speed)).
+
+## Licences
+
+The code's licence is for its owner to choose; note what the bundled models require:
+
+| Model | Licence |
+|---|---|
+| `yolo11s-pose.onnx`, `yolo11n-pose.onnx` (Ultralytics YOLO11 pose) | **AGPL-3.0**: distributing the package or an image with them (or serving them to others over a network) brings AGPL obligations |
+| `face_landmark.onnx`, `person_mask.onnx` (MediaPipe) | Apache-2.0 |
+| `face_expression.onnx` (mini-Xception, the `fer` package) | MIT; trained on FER2013, collected for a research challenge |
+| `voice_activity.onnx` (Silero VAD) | MIT |
+| `voice_embedding.onnx` (Resemblyzer) | Apache-2.0 |
+| `gender_age.onnx` (yu4u/age-gender-estimation) | MIT code, **trained on IMDB-WIKI, released for academic research only**; switch it off in people.toml (`[models] gender_age = false`) if that does not suit your use |
+
+Download only videos you are allowed to.

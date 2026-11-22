@@ -1,0 +1,133 @@
+# People's characteristics and how they are searched for (people.py, search.py).
+# Copy this file, change what you need and pass it with --config: tables are merged with these
+# defaults, so your file only needs what differs.
+
+[look]
+# Faces need this many pixels between the eyes at the video's size before their hair colour and
+# apparent gender/age are judged (see people.py for the tests behind these numbers).
+hair_min_eyes = 10
+gender_min_eyes = 12
+# Apparent gender: the median "looks female" probability of a person's faces. Between the two,
+# the face does not decide. The face model is weaker than the voice at 144p (on 17 test faces with
+# 13 px or more between the eyes, these thresholds left 4 undecided and got 1 wrong, a woman in
+# sunglasses; a woman with dyed purple hair scored 0.25-0.33), so when a person talks, the pitch of
+# their voice decides first (it separated all 12 labelled test speakers).
+female_above = 0.6
+male_below = 0.25
+# Apparent age bands for "young" and "old".
+young_below = 30
+old_above = 55
+# A characteristic needs this many samples (seconds) of a person to be decided, and the most
+# common answer must be at least this share of them.
+min_samples = 2
+min_share = 0.5
+# Apparent gender and age are judged on each person's clearest faces only, up to this many (the
+# face model is the slow part of the search; the median of a few clear faces is as good).
+faces_per_person = 5
+
+[models]
+# models/gender_age.onnx: the age and gender network from yu4u/age-gender-estimation (MIT code,
+# via the py-agender package), trained on the IMDB-WIKI faces, which are released for academic
+# research only. Check that suits your use; set this to false to leave it out (apparent gender then
+# comes from the voice, when a person talks, and age is not judged).
+gender_age = true
+
+[voice]
+# Median pitch of a voice. In the test recordings women spoke at 168-250 Hz and men at 98-119 Hz.
+low_below_hz = 140
+high_above_hz = 155
+# Two voices are taken for the same person at this fingerprint similarity or more (and a pitch
+# that does not rule it out). On meeting recordings the same speaker in different recordings
+# scored 0.81-0.93 and different speakers up to 0.90, so treat a match as "likely", and check it.
+same_voice_above = 0.86
+
+# Words a query can use, and what they mean. Colours name the palette entries below; a group lists
+# several (a query for "dark hair" takes black or brown).
+[words]
+female = ["woman", "women", "female", "lady", "ladies", "girl", "girls", "she", "her"]
+male = ["man", "men", "male", "guy", "guys", "gentleman", "boy", "boys", "he", "him"]
+anyone = ["person", "people", "someone", "somebody", "anyone", "anybody", "guest", "host", "speaker"]
+young = ["young", "younger", "youth"]
+old = ["old", "older", "elderly", "senior", "grey-haired", "gray-haired"]
+low_voice = ["deep", "low", "deep-voiced", "low-voiced"]
+high_voice = ["high", "high-pitched", "high-voiced"]
+hair = ["hair", "haired", "hairdo", "hairstyle"]
+top = ["shirt", "t-shirt", "tshirt", "top", "jacket", "coat", "sweater", "jumper", "hoodie", "blouse", "dress", "suit", "cardigan", "vest", "uniform"]
+bottom = ["trousers", "pants", "jeans", "skirt", "shorts", "leggings"]
+wearing = ["wearing", "dressed", "in"]
+ignore = ["a", "an", "the", "with", "who", "is", "are", "and", "of", "has", "have", "having", "that", "their", "his", "her", "some", "colour", "color", "coloured", "colored"]
+[words.actions]
+standing = ["standing", "stands", "stood", "stand"]
+sitting = ["sitting", "sits", "seated", "sat", "sit"]
+walking = ["walking", "walks", "walk", "strolling"]
+running = ["running", "runs", "run", "jogging", "sprinting"]
+jumping = ["jumping", "jumps", "jump", "leaping"]
+smiling = ["smiling", "smiles", "smile"]
+talking = ["talking", "talks", "talk", "speaking", "speaks", "saying", "says"]
+silent = ["silent", "listening", "quiet", "listens"]
+visible = ["appearing", "appears", "visible", "seen", "shown"]
+[words.colour]
+# other words for palette colours (hair and clothes)
+blonde = "blond"
+fair = "blond"
+golden = "blond"
+ginger = "red"
+auburn = "red"
+redhead = "red"
+redheaded = "red"
+brunette = "brown"
+violet = "purple"
+lilac = "purple"
+lavender = "purple"
+magenta = "pink"
+gray = "grey"
+silver = "grey"
+turquoise = "blue"
+teal = "blue"
+cream = "beige"
+tan = "beige"
+khaki = "beige"
+[words.groups]
+dark = ["black", "brown"]
+light = ["blond", "grey", "white"]
+grey = ["grey", "white"]
+blue = ["blue", "navy", "light blue"]
+
+# The palettes: each colour name is one or more example colours (sRGB). A measured colour takes the
+# name of the nearest example (in CIELAB, lightness counting half). Add or change examples to
+# match your videos; new names become searchable words.
+[colours.hair]
+"black" = ["#202020", "#272b25", "#352f2c", "#322522"]
+"brown" = ["#544334", "#615342", "#704d35", "#726142", "#7f5c3c"]
+"blond" = ["#9b6a40", "#a9855b", "#b99c6a", "#cbb387"]
+"red" = ["#7b3826", "#964826", "#b0592b"]
+"grey" = ["#7f7c76", "#938479", "#979786", "#aaa59a"]
+"white" = ["#c9c6c1", "#e5e3df"]
+"purple" = ["#522e5a", "#6e3573", "#864490", "#9a62ab", "#6e446a", "#7e5f90"]
+"pink" = ["#c05081", "#d86f92", "#e992a3"]
+"blue" = ["#1d438d", "#2d5192", "#376ea5", "#4f88b7"]
+"green" = ["#265c41", "#1e6c3c", "#30874b"]
+
+[colours.clothes]
+"black" = ["#202020", "#353434"]
+"white" = ["#e8e8e8", "#d7d4cf"]
+"grey" = ["#5e5e5e", "#7c7c7c", "#9e9e9e"]
+"navy" = ["#1c3361", "#264078"]
+"blue" = ["#125cb9", "#376ea5", "#2f8ac8", "#4777c4"]
+"light blue" = ["#98bddd", "#7ab1d7"]
+"red" = ["#9d2225", "#ca2d2b", "#d3463f"]
+"pink" = ["#dd6a9b", "#e692ac"]
+"orange" = ["#d26320", "#ed8220"]
+"yellow" = ["#eec052", "#fad139"]
+"green" = ["#225d31", "#2a8938", "#5aa146"]
+"purple" = ["#74398a", "#8f64bc"]
+"brown" = ["#603f28", "#805436", "#8c6239"]
+"beige" = ["#c1a687", "#c9b69d", "#d7c4a5", "#a08a70", "#8f7d66"]   # the last two: beige in shade
+
+# People you want to find by name. Their voice is enrolled from a stretch of a video where only
+# they talk (or a recording of them); a description is used when they are not talking.
+# [[people]]
+# name = "Jane"
+# voice_from = { video = "20240105_sampleVid01.mp4", start = 120.0, end = 150.0 }
+# # or: voice_file = "samples/jane.wav"
+# describe = "woman with purple hair"
