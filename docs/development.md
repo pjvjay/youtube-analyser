@@ -64,7 +64,14 @@ emulator (`npm install -g azurite`; `tests/conftest.py` starts it) or a real acc
 320" pytest ...` runs the end-to-end tests with other pose model settings (see
 [tests/README.md](../tests/README.md)).
 
-Coverage of the package at 2.0.0: **97%** of its lines (199 tests, `pytest --cov` from a clean
+The `dev` extra pins `opencv-python-headless==5.0.0.93`, the version the end-to-end thresholds
+were measured with. The package itself asks only for 4.9 or later, but the pictures OpenCV
+hands the models differ a little between versions: with 5.1.0.95 and with 4.14.0.94 two tests
+in `tests/test_talking.py` fail (the three-talkers clip finds, for example, 14 of 20 talking
+moments where 15 are needed). When you move the pin, run the whole suite and look at those two
+thresholds first.
+
+Coverage of the package at 2.0.0: **97%** of its lines (201 tests, `pytest --cov` from a clean
 cache, with Azurite); keep it above 90%. What is not covered is mostly error handling that needs
 a broken runtime, storage or ffmpeg to reach, the code paths without OpenVINO or on Windows, and
 `yta serve`'s call into uvicorn (the app itself is tested in-process).
